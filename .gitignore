@@ -1,0 +1,22 @@
+# Node / React
+node_modules/
+build/
+dist/
+
+# Environment files
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Logs & DB
+*.log
+*.sqlite3
+*.db
+backend/data/*.db
+
+# OS / misc
+.DS_Store

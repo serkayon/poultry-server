@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mill HMI Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <div class="container">
+
+      <!-- ── TOPBAR ───────────────────────────────────────── -->
+      <header class="topbar">
+        <div class="topbar-brand">
+          <div class="brand-mark">⚙</div>
+          <div>
+            <h1>Mill HMI Dashboard</h1>
+            <div class="topbar-sub">Production Control System · MILL-01</div>
+          </div>
+        </div>
+
+        <div class="topbar-status">
+          <div class="status-cell machine-cell">
+            <span class="sc-label">Machine Status</span>
+            <span class="badge {{ 'running' if machine_status.is_running else 'stopped' }}">
+              {{ 'Running' if machine_status.is_running else 'Stopped' }}
+            </span>
+          </div>
+          <div class="status-cell">
+            <span class="sc-label">Active Batch</span>
+            <span class="sc-value">
+              {{ machine_status.active_batch.batch_no if machine_status.active_batch else '—' }}
+            </span>
+          </div>
+          <div class="status-cell">
+            <span class="sc-label">Progress</span>
+            <span class="sc-value">
+              {{
+                machine_status.active_batch.progress_label
+                if machine_status.active_batch and machine_status.active_batch.progress_label
+                else '—'
+              }}
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <div class="page-body">
+
+        <!-- ── FLASH MESSAGES ─────────────────────────────── -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            <section class="messages">
+              {% for category, message in messages %}
+                <div class="msg {{ category }}">{{ message }}</div>
+              {% endfor %}
+            </section>
+          {% endif %}
+        {% endwith %}
+
+        <div class="two-col">
+
+          <!-- ── COL 1: Create Batch + Current Run ─────── -->
+          <div class="col">
+
+            <!-- ── CREATE BATCH ──────────────────────────── -->
+            <div class="card">
+              <div class="card-head">
+                <h2>Create Batch</h2>
+                <span class="card-tag">INPUT</span>
+              </div>
+              <div class="card-body">
+                <form method="post" action="{{ url_for('add_batch') }}" class="batch-form">
+                  <div class="grid two">
+                    <label>Date
+                      <input type="date" name="date" value="{{ today }}" required />
+                    </label>
+	                    <label>Batch Name
+	                      <input type="text" name="batch_no" value="{{ suggested_batch_no }}" placeholder="BATCH1001" />
+	                    </label>
+                  </div>
+                  <div class="grid two">
+                    <label>Batch Count
+                      <input type="number" name="batch_count" min="1" step="1" placeholder="20" required />
+                    </label>
+                    <label>Duration / Count (sec)
+                      <input type="number" name="duration_per_count_seconds" min="1" step="any" placeholder="60" required />
+                    </label>
+                  </div>
+                  <div class="btn-row">
+                    <button type="submit" class="btn primary">Submit Batch</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+
+            <!-- ── CURRENT RUN ───────────────────────────── -->
+            <div class="card">
+              <div class="card-head">
+                <h2>Current Run</h2>
+                <span class="card-tag" style="{{ 'color: var(--teal); border-color: var(--teal)' if machine_status.is_running else '' }}">
+                  {{ 'LIVE' if machine_status.is_running else 'IDLE' }}
+                </span>
+              </div>
+              <div class="card-body" style="padding: 0;">
+                {% if machine_status.active_batch %}
+                  <table class="kv-table">
+                    <tbody>
+                      <tr>
+                        <th>Batch No.</th>
+                        <td>{{ machine_status.active_batch.batch_no }}</td>
+                      </tr>
+                      <tr>
+                        <th>Run Status</th>
+                        <td>{{ machine_status.active_batch.run_status }}</td>
+                      </tr>
+                      <tr>
+                        <th>Progress</th>
+                        <td>{{ machine_status.active_batch.progress_label or '—' }}</td>
+                      </tr>
+                      <tr>
+                        <th>Duration / Count</th>
+                        <td>{{ machine_status.active_batch.duration_per_count_seconds or '—' }} sec</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                {% else %}
+                  <p class="muted" style="padding: 16px;">No active batch running.</p>
+                {% endif %}
+              </div>
+            </div>
+
+          </div><!-- /col 1 -->
+
+          <!-- ── COL 2: Machine Controls + Recent Batches ── -->
+          <div class="col">
+
+            <!-- ── MACHINE CONTROLS ──────────────────────── -->
+            <div class="card">
+              <div class="card-head">
+                <h2>Machine Controls</h2>
+                <span class="card-tag">CTRL</span>
+              </div>
+              <div class="card-body">
+                <div class="row controls">
+                  <form method="post" action="{{ url_for('start_machine') }}" class="inline-form">
+                    <label>Select Batch
+                      <select name="batch_id" required>
+                        <option value="">— Select batch —</option>
+                        {% for b in pending_batches %}
+                          <option value="{{ b.id }}">
+                            {{ b.batch_no }} ({{ b.progress_label or ('0/' ~ (b.planned_count or 0)) }})
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </label>
+                    <button type="submit" class="btn start">▶ Start</button>
+                  </form>
+                  <form method="post" action="{{ url_for('stop_machine') }}">
+                    <button type="submit" class="btn stop">■ Stop</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── RECENT BATCHES ────────────────────────── -->
+            <div class="card" style="flex: 1;">
+              <div class="card-head">
+                <h2>Recent Batches</h2>
+                <span class="card-tag">LOG</span>
+              </div>
+              <table class="hmi-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Batch No.</th>
+                    <th>Count Progress</th>
+                    <th>Status</th>
+                    <th>Output</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% if batches %}
+                    {% for b in batches[:12] %}
+                      {%- set s = b.run_status | lower -%}
+                      {%- set chip = 'running' if 'run' in s else ('complete' if 'complet' in s else ('stopped' if 'stop' in s else 'pending')) -%}
+                      <tr>
+                        <td class="td-id">{{ b.id }}</td>
+                        <td class="td-batch">{{ b.batch_no }}</td>
+                        <td class="td-prog">{{ b.progress_label or '—' }}</td>
+                        <td><span class="chip {{ chip }}">{{ b.run_status }}</span></td>
+                        <td class="td-out">{{ b.output or '—' }}</td>
+                      </tr>
+                    {% endfor %}
+                  {% else %}
+                    <tr>
+                      <td colspan="5" class="muted" style="padding: 20px 12px; font-style: italic;">
+                        No batch records found.
+                      </td>
+                    </tr>
+                  {% endif %}
+                </tbody>
+              </table>
+            </div>
+
+          </div><!-- /col 2 -->
+
+        </div><!-- /two-col -->
+      </div><!-- /page-body -->
+
+      <!-- ── STATUSBAR ─────────────────────────────────────── -->
+      <div class="statusbar">
+        <span>MILL HMI · PRODUCTION CONTROL · v2.4</span>
+        <div class="statusbar-right">
+          <span class="sb-item"><span class="sb-dot"></span> SYS OK</span>
+          <span id="sb-clock">--:--:--</span>
+        </div>
+      </div>
+
+    </div><!-- /container -->
+
+    <script>
+      function tick() {
+        const d = new Date();
+        const p = n => String(n).padStart(2,'0');
+        document.getElementById('sb-clock').textContent =
+          p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+      }
+      tick(); setInterval(tick, 1000);
+    </script>
+  </body>
+</html>
