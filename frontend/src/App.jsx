@@ -1,5 +1,5 @@
 import React from 'react'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { AuthProvider } from './context/AuthContext'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
@@ -26,9 +26,16 @@ function ServerMaintenanceOverlay() {
 }
 
 export default function App() {
+  const location = useLocation()
+  const shouldMonitorBackend = location.pathname.startsWith('/layout')
   const [isBackendReachable, setIsBackendReachable] = React.useState(backendStatus.get())
 
   React.useEffect(() => {
+    if (!shouldMonitorBackend) {
+      setIsBackendReachable(true)
+      return
+    }
+
     const unsubscribe = backendStatus.subscribe(setIsBackendReachable)
     const probeBackend = () => {
       backendStatus.ping().catch(() => {})
@@ -41,11 +48,11 @@ export default function App() {
       clearInterval(timer)
       unsubscribe()
     }
-  }, [])
+  }, [shouldMonitorBackend])
 
   React.useEffect(() => {
     const originalOverflow = document.body.style.overflow
-    if (!isBackendReachable) {
+    if (shouldMonitorBackend && !isBackendReachable) {
       document.body.style.overflow = 'hidden'
     } else {
       document.body.style.overflow = originalOverflow || ''
@@ -54,7 +61,7 @@ export default function App() {
     return () => {
       document.body.style.overflow = originalOverflow
     }
-  }, [isBackendReachable])
+  }, [isBackendReachable, shouldMonitorBackend])
 
   return (
     <AuthProvider>
@@ -74,7 +81,7 @@ export default function App() {
              {/* <Route path="login" element={<ClientLogin />} /> */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-        {!isBackendReachable && <ServerMaintenanceOverlay />}
+        {shouldMonitorBackend && !isBackendReachable && <ServerMaintenanceOverlay />}
       </>
     </AuthProvider>
   )

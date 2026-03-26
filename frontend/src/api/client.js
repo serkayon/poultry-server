@@ -103,7 +103,7 @@ export const backendStatus = {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 4000)
     try {
-      const response = await fetch(`${apiBaseUrl}/config/product-types`, {
+      const response = await fetch(`${apiBaseUrl}/health`, {
         method: 'GET',
         cache: 'no-store',
         signal: controller.signal,
