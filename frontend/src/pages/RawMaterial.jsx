@@ -29,6 +29,14 @@ const DEFAULT_TIME_PARTS = { hour: "12", minute: "00", meridiem: "AM" }
 
 const pad2 = (value) => String(value).padStart(2, "0")
 
+function shiftDateInput(dateInput, daysOffset) {
+  if (!DATE_ONLY_RE.test(String(dateInput || ""))) return ""
+  const date = new Date(`${dateInput}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return ""
+  date.setDate(date.getDate() + Number(daysOffset || 0))
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+}
+
 function getTimePartsIST(value) {
   const parsed = parseApiDate(value)
   if (!parsed) return { ...DEFAULT_TIME_PARTS }
@@ -124,14 +132,37 @@ export default function RawMaterial() {
   const [popupMessage, setPopupMessage] = useState('')
   const { requestPin, pinDialog } = usePinGate()
 
-  //Table
-  const [search, setSearch] = useState("");
-  const [rmTypeFilter, setRmTypeFilter] = useState("");
+	  //Table
+	  const [search, setSearch] = useState("");
+	  const [rmTypeFilter, setRmTypeFilter] = useState("");
 const [currentPage, setCurrentPage] = useState(1);
-
+const [dateRangePreset, setDateRangePreset] = useState("today")
+	
 const [fromDate, setFromDate] = useState("")
 const [toDate, setToDate] = useState("")
 const rowsPerPage = 5;
+
+const todayDate = todayDateInputIST()
+const resolvedRange = (() => {
+  if (dateRangePreset === "custom") {
+    return {
+      from: fromDate || "",
+      to: toDate || "",
+    }
+  }
+  if (dateRangePreset === "last_7") {
+    return { from: shiftDateInput(todayDate, -6), to: todayDate }
+  }
+  if (dateRangePreset === "last_15") {
+    return { from: shiftDateInput(todayDate, -14), to: todayDate }
+  }
+  if (dateRangePreset === "last_30") {
+    return { from: shiftDateInput(todayDate, -29), to: todayDate }
+  }
+  return { from: todayDate, to: todayDate }
+})()
+const effectiveFromDate = resolvedRange.from
+const effectiveToDate = resolvedRange.to
 
 
 
@@ -180,12 +211,12 @@ const entryDate = toDateInputIST(e.date, "");
       e.rm_type.toLowerCase().includes(search.toLowerCase()) ||
       e.supplier.toLowerCase().includes(search.toLowerCase()) ||
       e.vehicle_no.toLowerCase().includes(search.toLowerCase())
-    ) &&
-    (rmTypeFilter ? e.rm_type === rmTypeFilter : true) &&
-
-  (fromDate ? entryDate >= fromDate : true) &&
-(toDate ? entryDate <= toDate : true)
-  );
+	    ) &&
+	    (rmTypeFilter ? e.rm_type === rmTypeFilter : true) &&
+	
+	  (effectiveFromDate ? entryDate >= effectiveFromDate : true) &&
+	(effectiveToDate ? entryDate <= effectiveToDate : true)
+	  );
 });
 
 const totalPages = Math.ceil(filteredEntries.length / rowsPerPage);
@@ -194,6 +225,10 @@ const paginatedEntries = filteredEntries.slice(
   (currentPage - 1) * rowsPerPage,
   currentPage * rowsPerPage
 );
+
+useEffect(() => {
+  setCurrentPage(1)
+}, [search, rmTypeFilter, dateRangePreset, fromDate, toDate])
 
   const [form, setForm] = useState(emptyEntryForm())
   const [editForm, setEditForm] = useState(emptyEntryForm())
@@ -230,6 +265,26 @@ const paginatedEntries = filteredEntries.slice(
     }
     return acc
   }, {})
+  const currentMonthKey = todayDateInputIST().slice(0, 7)
+  const currentMonthLabel = new Intl.DateTimeFormat("en-IN", {
+    timeZone: IST_TIME_ZONE,
+    month: "long",
+    year: "numeric",
+  }).format(new Date())
+  const isCurrentMonth = (value) =>
+    String(toDateInputIST(value, "") || "").startsWith(currentMonthKey)
+
+  const latestStockByNameCurrentMonth = rmStockRows
+    .filter((row) => isCurrentMonth(row?.date))
+    .reduce((acc, row) => {
+      const current = acc[row.rm_name]
+      const rowTime = parseApiDate(row.date)?.getTime() || Number.NEGATIVE_INFINITY
+      const currentTime = parseApiDate(current?.date)?.getTime() || Number.NEGATIVE_INFINITY
+      if (!current || rowTime > currentTime) {
+        acc[row.rm_name] = row
+      }
+      return acc
+    }, {})
 
   // const individualStock = rmTypes
   //   .map((t) => ({
@@ -254,8 +309,22 @@ const paginatedEntries = filteredEntries.slice(
     .filter((row) => row.rm_name && Number.isFinite(row.closing_stock) && row.closing_stock > 0)
     .sort((a, b) => b.closing_stock - a.closing_stock)
 
-  const totalStockWeight = individualStock.reduce((sum, item) => sum + (Number(item.closing_stock) || 0), 0)
-  const totalInwardWeight = entries.reduce((sum, item) => sum + (Number(item.total_weight) || 0), 0)
+  const currentMonthStockRows = rmTypes
+    .slice()
+    .reverse()
+    .map((t) => ({
+      rm_name: t.name,
+      closing_stock: latestStockByNameCurrentMonth[t.name]?.closing_stock ?? 0,
+    }))
+  const totalStockWeight = currentMonthStockRows.reduce(
+    (sum, item) => sum + (Number(item.closing_stock) || 0),
+    0
+  )
+  const totalInwardWeight = entries.reduce(
+    (sum, item) => sum + (isCurrentMonth(item?.date) ? (Number(item.total_weight) || 0) : 0),
+    0
+  )
+  const toMtDisplay = (kgValue) => `${(Number(kgValue || 0) / 1000).toFixed(3)} MT`
 
   const handleAdd = async (e) => {
     e.preventDefault()
@@ -398,7 +467,22 @@ const paginatedEntries = filteredEntries.slice(
   }
 
   const download = (format) => {
-    rawMaterial.download(format).then(({ data }) => {
+    const params = {}
+    if (effectiveFromDate) {
+      params.from_date = toApiDateTimeFrom12HourInput(effectiveFromDate, "12", "00", "AM")
+    }
+    if (effectiveToDate) {
+      params.to_date = toApiDateTimeFrom12HourInput(effectiveToDate, "11", "59", "PM")
+    }
+    if (rmTypeFilter) {
+      params.rm_type = rmTypeFilter
+    }
+    const query = String(search || "").trim()
+    if (query) {
+      params.q = query
+    }
+
+    rawMaterial.download(format, params).then(({ data }) => {
       const ext = format === 'pdf' ? 'pdf' : format === 'xlsx' || format === 'excel' ? 'xlsx' : 'csv'
       const url = URL.createObjectURL(new Blob([data]))
       const a = document.createElement('a')
@@ -430,6 +514,9 @@ const paginatedEntries = filteredEntries.slice(
 
   {/* Total Stock */}
 <div className="relative rounded-xl overflow-hidden shadow-md h-36 sm:h-40">
+  <div className="absolute top-2 right-3 z-20 text-[11px] sm:text-xs font-semibold text-[#263C2C] bg-white/80 px-2 py-0.5 rounded">
+    {currentMonthLabel}
+  </div>
   {/* background image */}
   <img
     src={cornbag}
@@ -457,13 +544,16 @@ const paginatedEntries = filteredEntries.slice(
     </p>
 
     <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold text-[#263C2C]">
-      {totalStockWeight.toFixed(2)} KG
+      {toMtDisplay(totalStockWeight)}
     </h2>
   </div>
 </div>
 
   {/* Total Usage */}
 <div className="relative rounded-xl shadow-md overflow-hidden h-36 sm:h-40">
+  <div className="absolute top-2 right-3 z-20 text-[11px] sm:text-xs font-semibold text-[#263C2C] bg-white/80 px-2 py-0.5 rounded">
+    {currentMonthLabel}
+  </div>
 
   {/* background image */}
   <img
@@ -491,53 +581,53 @@ const paginatedEntries = filteredEntries.slice(
     </p>
 
     <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold text-[#263C2C]">
-      {totalInwardWeight.toFixed(2)} KG
+      {toMtDisplay(totalInwardWeight)}
     </h2>
   </div>
 </div>
 
 </div>  
-    <div className="
-  flex flex-col gap-4
-  sm:flex-row sm:items-center sm:justify-between
-">
+	    <div className="
+	  flex flex-col gap-3
+	  sm:flex-row sm:items-start sm:justify-between
+	">
 
   <h1 className="text-xl font-semibold text-slate-800 text-center sm:text-left">
     Raw Material
   </h1>
 
-  <div className="
-    flex flex-wrap justify-center sm:justify-end
-    gap-2
-  ">
-    <button
-      onClick={() => setShowAdd(true)}
-      className="px-4 py-2 rounded-lg bg-[#245658] text-primary font-medium w-full sm:w-auto"
-    >
-      + Add RM Entry
-    </button>
+	  <div className="
+	    flex flex-wrap justify-center sm:justify-end sm:ml-auto
+	    gap-2
+	  ">
+	    <button
+	      onClick={() => setShowAdd(true)}
+	      className="px-4 py-2 rounded-lg bg-[#245658] text-primary font-medium whitespace-nowrap"
+	    >
+	      + Add RM Entry
+	    </button>
 
-    <button
-      onClick={() => download('pdf')}
-      className="px-4 py-2 rounded-lg border border-gray-600 text-gray-800 hover:bg-primary-light w-full sm:w-auto"
-    >
-      Download PDF
-    </button>
+	    <button
+	      onClick={() => download('pdf')}
+	      className="px-4 py-2 rounded-lg border border-gray-600 text-gray-800 hover:bg-primary-light whitespace-nowrap"
+	    >
+	      Download PDF
+	    </button>
 
-    <button
-      onClick={() => download('xlsx')}
-      className="px-4 py-2 rounded-lg border border-gray-600 text-gray-800 hover:bg-primary-light w-full sm:w-auto"
-    >
-      Download Excel
-    </button>
+	    <button
+	      onClick={() => download('xlsx')}
+	      className="px-4 py-2 rounded-lg border border-gray-600 text-gray-800 hover:bg-primary-light whitespace-nowrap"
+	    >
+	      Download Excel
+	    </button>
 
-    <button
-      onClick={() => setShowAddType(true)}
-      className="px-4 py-2 rounded-lg border border-gray-600 text-gray-800 hover:bg-primary-light w-full sm:w-auto"
-    >
-      + Add RM Type
-    </button>
-  </div>
+	    <button
+	      onClick={() => setShowAddType(true)}
+	      className="px-4 py-2 rounded-lg border border-gray-600 text-gray-800 hover:bg-primary-light whitespace-nowrap"
+	    >
+	      + Add RM Type
+	    </button>
+	  </div>
 </div>
       <Modal open={showAddType} onClose={() => { setShowAddType(false); setNewRmType('') }} title="Add RM Type">
         <p className="text-gray-900 text-sm mb-3">New RM name will be added to Raw Material report and RM stock.</p>
@@ -588,27 +678,45 @@ const paginatedEntries = filteredEntries.slice(
       </select>
     </div>
 
-    {/* Date From */}
+    {/* Date Range */}
     <div>
-      <label className="block text-xs text-gray-500 mb-1">Date From</label>
-      <input
-        type="date"
-        value={fromDate}
-        onChange={(e) => setFromDate(e.target.value)}
+      <label className="block text-xs text-gray-500 mb-1">Date Range</label>
+      <select
+        value={dateRangePreset}
+        onChange={(e) => setDateRangePreset(e.target.value)}
         className="border border-gray-400 rounded-lg px-3 py-2 text-sm"
-      />
+      >
+        <option value="today">Today</option>
+        <option value="last_7">Last 7 Days</option>
+        <option value="last_15">Last 15 Days</option>
+        <option value="last_30">Last 30 Days</option>
+        <option value="custom">Custom</option>
+      </select>
     </div>
 
-    {/* Date To */}
-    <div>
-      <label className="block text-xs text-gray-500 mb-1">Date To</label>
-      <input
-        type="date"
-        value={toDate}
-        onChange={(e) => setToDate(e.target.value)}
-        className="border border-gray-400 rounded-lg px-3 py-2 text-sm"
-      />
-    </div>
+    {dateRangePreset === "custom" && (
+      <>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Date From</label>
+          <input
+            type="date"
+            value={fromDate}
+            onChange={(e) => setFromDate(e.target.value)}
+            className="border border-gray-400 rounded-lg px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Date To</label>
+          <input
+            type="date"
+            value={toDate}
+            onChange={(e) => setToDate(e.target.value)}
+            className="border border-gray-400 rounded-lg px-3 py-2 text-sm"
+          />
+        </div>
+      </>
+    )}
 
   </div>
 </div>
@@ -651,7 +759,11 @@ const paginatedEntries = filteredEntries.slice(
 	                <button
 	                  onClick={() => requestPin(
 	                    () => openEdit(e),
-	                    { title: 'PIN Required', message: 'Enter PIN to edit (1234) raw material entry.' }
+	                    {
+                        title: 'PIN Required',
+                        message: 'Enter PIN to edit (1234) raw material entry.',
+                        pinType: 'rm_entry_edit',
+                      }
 	                  )}
 	                  className="text-blue-700 font-medium underline"
 	                >
@@ -660,7 +772,11 @@ const paginatedEntries = filteredEntries.slice(
 	                <button
 	                  onClick={() => requestPin(
 	                    () => openLab(e),
-	                    { title: 'PIN Required', message: 'Enter PIN to edit (1234) lab report.' }
+	                    {
+                        title: 'PIN Required',
+                        message: 'Enter PIN to edit (1234) lab report.',
+                        pinType: 'rm_lab_edit',
+                      }
 	                  )}
 	                  className="text-green-700 font-medium underline"
 	                >

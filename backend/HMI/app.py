@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 
-BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://43.205.124.78:8000").rstrip("/")
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://localhost:8000").rstrip("/")
 REQUEST_TIMEOUT_SECONDS = 10
 HMI_SECRET_KEY = os.getenv("HMI_SECRET_KEY", "hmi-local-dev-secret")
 

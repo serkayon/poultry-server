@@ -41,7 +41,7 @@ def init_db():
     from .models.raw_material import RawMaterialType
     from .models.stock import FeedStock
     from .models.user import User, UserRole
-    from .services.auth import hash_password, verify_password
+    from .services.auth import hash_password
     from sqlalchemy import select
 
     Base.metadata.create_all(bind=engine)
@@ -158,7 +158,19 @@ def init_db():
         if "settings_pin_hash" not in existing_columns:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE users ADD COLUMN settings_pin_hash VARCHAR(255)"))
-        default_pin_hash = hash_password("1234")
+        scoped_pin_columns = [
+            "pin_rm_entry_edit_hash",
+            "pin_rm_lab_edit_hash",
+            "pin_dispatch_edit_hash",
+            "pin_production_details_edit_hash",
+            "pin_production_report_access_hash",
+            "pin_recipe_access_hash",
+        ]
+        for column_name in scoped_pin_columns:
+            if column_name not in existing_columns:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} VARCHAR(255)"))
+        default_pin_value = "1234"
         with engine.begin() as conn:
             conn.execute(
                 text(
@@ -166,8 +178,17 @@ def init_db():
                     "SET settings_pin_hash = :pin_hash "
                     "WHERE settings_pin_hash IS NULL OR settings_pin_hash = ''"
                 ),
-                {"pin_hash": default_pin_hash},
+                {"pin_hash": default_pin_value},
             )
+            for column_name in scoped_pin_columns:
+                conn.execute(
+                    text(
+                        f"UPDATE users "
+                        f"SET {column_name} = :pin_hash "
+                        f"WHERE {column_name} IS NULL OR {column_name} = ''"
+                    ),
+                    {"pin_hash": default_pin_value},
+                )
     if inspector.has_table("feed_stock"):
         existing_columns = {col["name"] for col in inspector.get_columns("feed_stock")}
         if "bag_weight_grams" not in existing_columns:
@@ -176,16 +197,23 @@ def init_db():
             needs_feed_variant_rebuild = True
 
     with SessionLocal() as session:
-        # One-time migration: convert legacy default PIN 123456 to new default PIN 1234.
-        # This keeps existing custom PINs unchanged.
-        migrated_default_pin_hash = hash_password("1234")
+        # Normalize legacy hashed PINs to plain 4-digit values.
+        # Any non-4-digit stored value is reset to the default 1234.
+        scoped_pin_fields = [
+            "settings_pin_hash",
+            "pin_rm_entry_edit_hash",
+            "pin_rm_lab_edit_hash",
+            "pin_dispatch_edit_hash",
+            "pin_production_details_edit_hash",
+            "pin_production_report_access_hash",
+            "pin_recipe_access_hash",
+        ]
         users = session.execute(select(User)).scalars().all()
         for user in users:
-            existing_pin_hash = user.settings_pin_hash or ""
-            if not existing_pin_hash:
-                continue
-            if verify_password("123456", existing_pin_hash):
-                user.settings_pin_hash = migrated_default_pin_hash
+            for field_name in scoped_pin_fields:
+                existing_pin_value = str(getattr(user, field_name, "") or "").strip()
+                if not existing_pin_value.isdigit() or len(existing_pin_value) != 4:
+                    setattr(user, field_name, "1234")
 
         if session.execute(select(RawMaterialType).limit(1)).scalars().one_or_none() is None:
             for name in ["MAIZE", "SOYA", "DORB", "DDGS", "MDOC", "MGL"]:
@@ -194,12 +222,18 @@ def init_db():
         if session.get(MachineState, 1) is None:
             session.add(MachineState(id=1, is_running=False, active_batch_id=None))
         if session.execute(select(User).limit(1)).scalars().one_or_none() is None:
-            default_pin_hash = hash_password("1234")
+            default_pin_hash = "1234"
             session.add(
                 User(
                     email="client@gmail.com",
                     hashed_password=hash_password("open@123"),
                     settings_pin_hash=default_pin_hash,
+                    pin_rm_entry_edit_hash=default_pin_hash,
+                    pin_rm_lab_edit_hash=default_pin_hash,
+                    pin_dispatch_edit_hash=default_pin_hash,
+                    pin_production_details_edit_hash=default_pin_hash,
+                    pin_production_report_access_hash=default_pin_hash,
+                    pin_recipe_access_hash=default_pin_hash,
                     full_name="Client User",
                     role=UserRole.customer.value,
                     company_name="Feed Mill Intelligence",

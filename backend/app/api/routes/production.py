@@ -31,12 +31,15 @@ from ...services.production_runtime import (
 from ...services.stock import (
     add_feed_produced,
     add_rm_consumption,
+    calculate_rm_consumption_quantity,
     rebuild_rm_stock_ledger,
     _latest_rm_closing,
     _start_of_day,
 )
 from ...utils.export import (
     export_batch_report_pdf,
+    export_multi_table_to_excel,
+    export_multi_table_to_pdf,
     export_table_to_csv,
     export_table_to_excel,
     export_table_to_pdf,
@@ -273,6 +276,9 @@ def create_batch():
         if date is None:
             raise ValueError("date is required")
         product_name = required(payload, "product_name")
+        batch_size_value = parse_float(payload, "batch_size", required_field=True)
+        if batch_size_value is None or batch_size_value <= 0:
+            raise ValueError("batch_size must be greater than 0")
         recipe_id_raw = payload.get("recipe_id")
         recipe_id = int(recipe_id_raw) if recipe_id_raw not in (None, "") else None
         batch_no_value = _parse_batch_no(payload.get("batch_no"))
@@ -325,16 +331,26 @@ def create_batch():
         # Validate stock availability BEFORE creating batch
         insufficient_materials = []
         for material in materials:
+            required_quantity = calculate_rm_consumption_quantity(
+                material["quantity"],
+                batch_size_value,
+            )
             available, is_insufficient = _get_rm_available_stock(
                 db=db,
                 client_id=DEFAULT_CLIENT_ID,
                 rm_name=material["rm_name"],
-                quantity=material["quantity"],
+                quantity=required_quantity,
                 date=date,
             )
             if is_insufficient:
                 insufficient_materials.append(
-                    f"{material['rm_name']} (required: {material['quantity']}, available: {available})"
+                    (
+                        f"{material['rm_name']} "
+                        f"(required: {required_quantity}, "
+                        f"weight/batch: {material['quantity']}, "
+                        f"batch_count: {batch_size_value}, "
+                        f"available: {available})"
+                    )
                 )
         
         if insufficient_materials:
@@ -350,7 +366,7 @@ def create_batch():
                 batch_no=batch_no_value or None,
                 date=date,
                 product_name=product_name,
-                batch_size=parse_float(payload, "batch_size", required_field=True),
+                batch_size=batch_size_value,
                 mop=parse_float(payload, "mop"),
                 water=parse_float(payload, "water"),
                 num_bags=num_bags_value,
@@ -358,7 +374,7 @@ def create_batch():
                 output=output_value,
                 recipe_id=recipe_id,
                 hmi_duration_seconds=None,
-                hmi_completed_count=normalize_batch_count(parse_float(payload, "batch_size") or 0),
+                hmi_completed_count=normalize_batch_count(batch_size_value),
                 hmi_status=RUN_STATUS_COMPLETED,
                 hmi_started_at=now,
                 hmi_completed_at=now,
@@ -384,11 +400,15 @@ def create_batch():
                 )
                 db.add(row)
                 material_rows.append(row)
+                required_quantity = calculate_rm_consumption_quantity(
+                    material["quantity"],
+                    batch_size_value,
+                )
                 add_rm_consumption(
                     db=db,
                     client_id=DEFAULT_CLIENT_ID,
                     rm_name=material["rm_name"],
-                    quantity=material["quantity"],
+                    quantity=required_quantity,
                     date=batch.date,
                 )
             db.flush()
@@ -522,6 +542,7 @@ def update_batch_details(batch_id: int):
                 return error("Batch not found", 404)
 
             batch_updated = False
+            rm_stock_rebuild_required = False
 
             if "date" in payload:
                 try:
@@ -532,6 +553,7 @@ def update_batch_details(batch_id: int):
                     return error("date is required")
                 batch.date = parsed_date
                 batch_updated = True
+                rm_stock_rebuild_required = True
 
             if "batch_no" in payload:
                 try:
@@ -592,6 +614,7 @@ def update_batch_details(batch_id: int):
                     return error("batch_size must be greater than 0")
                 batch.batch_size = batch_size_value
                 batch_updated = True
+                rm_stock_rebuild_required = True
 
             if "mop" in payload:
                 try:
@@ -658,8 +681,11 @@ def update_batch_details(batch_id: int):
                         )
                     )
                 db.flush()
-                rebuild_rm_stock_ledger(db=db, client_id=DEFAULT_CLIENT_ID)
+                rm_stock_rebuild_required = True
                 batch_updated = True
+
+            if rm_stock_rebuild_required:
+                rebuild_rm_stock_ledger(db=db, client_id=DEFAULT_CLIENT_ID)
 
             if batch_updated:
                 batch.last_modified_at = datetime.utcnow()
@@ -1024,6 +1050,105 @@ def download_single_batch(batch_id: int):
             plc_start=batch_start,
             plc_end=batch_end,
         ),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}.pdf"},
+    )
+
+
+@production_bp.get("/<int:batch_id>/consumption/download")
+def download_batch_consumption_report(batch_id: int):
+    file_format = request.args.get("format", "pdf").lower()
+
+    with db_session() as db:
+        batch = (
+            db.execute(
+                select(ProductionBatch).where(
+                    ProductionBatch.id == batch_id,
+                    ProductionBatch.client_id == DEFAULT_CLIENT_ID,
+                )
+            )
+            .scalars()
+            .one_or_none()
+        )
+        if not batch:
+            return error("Batch not found", 404)
+
+        materials = (
+            db.execute(
+                select(ProductionBatchMaterial)
+                .where(ProductionBatchMaterial.batch_id == batch_id)
+                .order_by(ProductionBatchMaterial.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+
+    total_batch = float(batch.batch_size or 0)
+    consumption_rows: list[tuple] = []
+    total_weight_per_batch = 0.0
+    total_weight = 0.0
+
+    for material in materials:
+        weight_per_batch = float(material.quantity or 0)
+        material_total_weight = weight_per_batch * total_batch
+        total_weight_per_batch += weight_per_batch
+        total_weight += material_total_weight
+        consumption_rows.append(
+            (
+                material.rm_name,
+                weight_per_batch,
+                total_batch,
+                material_total_weight,
+            )
+        )
+
+    consumption_rows.append(
+        (
+            "TOTAL",
+            total_weight_per_batch,
+            total_batch,
+            total_weight,
+        )
+    )
+
+    batch_rows = [
+        ("Date", batch.date.strftime("%Y-%m-%d") if batch.date else ""),
+        ("Batch No", _display_batch_no(batch)),
+        ("Product", batch.product_name or ""),
+        ("Batch Count", total_batch),
+        ("MOP", batch.mop if batch.mop is not None else ""),
+        ("Water", batch.water if batch.water is not None else ""),
+        ("No. of Bags", batch.num_bags if batch.num_bags is not None else ""),
+        ("Weight/Bag (kg)", batch.weight_per_bag if batch.weight_per_bag is not None else ""),
+        ("Total Output (kg)", batch.output if batch.output is not None else ""),
+    ]
+
+    sections = [
+        {
+            "title": "Batch Details",
+            "sheet_name": "Batch Details",
+            "headers": ["Field", "Value"],
+            "rows": batch_rows,
+        },
+        {
+            "title": "Consumption Details",
+            "sheet_name": "Consumption",
+            "headers": ["RM Name", "Weight/Batch (kg)", "Total Batch", "Total Weight (kg)"],
+            "rows": consumption_rows,
+        },
+    ]
+
+    filename = f"batch_{batch_id}_consumption_report"
+
+    if file_format in ("excel", "xlsx"):
+        return Response(
+            export_multi_table_to_excel("Batch Consumption Report", sections),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"},
+        )
+
+    return Response(
+        export_multi_table_to_pdf("Batch Consumption Report", sections),
         mimetype="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}.pdf"},
     )

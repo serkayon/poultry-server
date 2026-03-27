@@ -14,6 +14,15 @@ const initialRecipeForm = () => ({
   materials: [{ ...EMPTY_RECIPE_MATERIAL }],
 })
 
+const PIN_SCOPE_OPTIONS = [
+  { value: "rm_entry_edit", label: "RM Entry Edit PIN" },
+  { value: "rm_lab_edit", label: "RM Lab Edit PIN" },
+  { value: "dispatch_edit", label: "Dispatch Edit PIN" },
+  { value: "production_details_edit", label: "Production Details PIN" },
+  { value: "production_report_access", label: "Production Report PIN" },
+  { value: "recipe_access", label: "Recipe Access PIN" },
+]
+
 export default function Settings() {
   const { requestPin, pinDialog } = usePinGate()
   const [showPinModal, setShowPinModal] = useState(false);
@@ -34,12 +43,18 @@ const [showConfirmPin, setShowConfirmPin] = useState(false);
   const [showAddRecipe, setShowAddRecipe] = useState(false)
   const [recipeError, setRecipeError] = useState('')
   const [editingRecipeId, setEditingRecipeId] = useState(null)
+  const [viewingRecipe, setViewingRecipe] = useState(null)
   const [recipeForm, setRecipeForm] = useState(initialRecipeForm)
   const [popupMessage, setPopupMessage] = useState('')
   const [rmTypeToDelete, setRmTypeToDelete] = useState(null)
   const [productTypeToDelete, setProductTypeToDelete] = useState(null)
   const [recipeToDelete, setRecipeToDelete] = useState(null)
-  const [pinForm, setPinForm] = useState({ current_pin: '', new_pin: '', confirm_pin: '' })
+  const [pinForm, setPinForm] = useState({
+    pin_type: PIN_SCOPE_OPTIONS[0].value,
+    current_pin: '',
+    new_pin: '',
+    confirm_pin: '',
+  })
   const [pinError, setPinError] = useState('')
   const [pinSuccess, setPinSuccess] = useState('')
   const [pinSaving, setPinSaving] = useState(false)
@@ -263,6 +278,14 @@ const [showConfirmPin, setShowConfirmPin] = useState(false);
     setRecipeToDelete(recipe)
   }
 
+  const openViewRecipeModal = (recipe) => {
+    setViewingRecipe(recipe || null)
+  }
+
+  const closeViewRecipeModal = () => {
+    setViewingRecipe(null)
+  }
+
   const confirmDeleteRecipe = async () => {
     if (!recipeToDelete) return
     try {
@@ -280,6 +303,7 @@ const handleClosePinModal = () => {
 
   // Reset form fields
   setPinForm({
+    pin_type: PIN_SCOPE_OPTIONS[0].value,
     current_pin: "",
     new_pin: "",
     confirm_pin: "",
@@ -314,10 +338,11 @@ const handleClosePinModal = () => {
 
     try {
       setPinSaving(true)
-      await auth.changePin(pinForm.current_pin, pinForm.new_pin)
-      setPinForm({ current_pin: '', new_pin: '', confirm_pin: '' })
-      setPinSuccess('PIN updated successfully.')
+      await auth.changePin(pinForm.current_pin, pinForm.new_pin, pinForm.pin_type)
+      const selectedScope = PIN_SCOPE_OPTIONS.find((item) => item.value === pinForm.pin_type)
+      setPinSuccess(`${selectedScope?.label || 'Selected'} updated successfully.`)
       setPinForm({
+  pin_type: pinForm.pin_type,
   current_pin: "",
   new_pin: "",
   confirm_pin: "",
@@ -339,7 +364,7 @@ const handleClosePinModal = () => {
     onClick={() => setShowPinModal(true)}
     className="bg-[#245658] hover:bg-[#1d4446] text-white px-6 py-2 rounded-lg shadow-md transition mb-5"
   >
-    Change Settings PIN
+    Change Access PIN
   </button>
 </div>
 
@@ -359,10 +384,31 @@ const handleClosePinModal = () => {
       </button>
 
       <h2 className="text-lg font-semibold mb-5 text-gray-800">
-        Update Settings PIN
+        Update Access PIN
       </h2>
 
       <form onSubmit={changePin} className="space-y-4">
+        <div>
+          <label className="block text-sm text-gray-600 mb-1">
+            PIN Type
+          </label>
+          <select
+            value={pinForm.pin_type}
+            onChange={(e) =>
+              setPinForm((f) => ({
+                ...f,
+                pin_type: e.target.value,
+              }))
+            }
+            className="w-full border border-gray-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-[#245658] focus:outline-none"
+          >
+            {PIN_SCOPE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
 
         {/* Current PIN */}
         <div>
@@ -569,9 +615,16 @@ const handleClosePinModal = () => {
                         <div className="flex gap-2">
                           <button
                             type="button"
+                            onClick={() => openViewRecipeModal(recipe)}
+                            className="px-3 py-1 rounded border border-gray-400 text-xs text-gray-800 hover:bg-gray-100"
+                          >
+                            View
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => requestPin(
                               () => openEditRecipeModal(recipe),
-                              { title: 'PIN Required', message: 'Enter PIN to edit (1234) recipe.' }
+                              { title: 'PIN Required', message: 'Enter PIN to edit (1234) recipe.', pinType: 'recipe_access' }
                             )}
                             className="px-3 py-1 rounded border border-gray-400 text-xs text-gray-800 hover:bg-gray-100"
                           >
@@ -581,7 +634,7 @@ const handleClosePinModal = () => {
                             type="button"
                             onClick={() => requestPin(
                               () => deleteRecipe(recipe),
-                              { title: 'PIN Required', message: 'Enter PIN to delete recipe.' }
+                              { title: 'PIN Required', message: 'Enter PIN to delete recipe.', pinType: 'recipe_access' }
                             )}
                             className="px-3 py-1 rounded border border-red-300 text-xs text-red-700 hover:bg-red-50"
                           >
@@ -593,13 +646,6 @@ const handleClosePinModal = () => {
                     <p className="text-xs text-slate-500 mt-1">
                       {Array.isArray(recipe.materials) ? recipe.materials.length : 0} materials
                     </p>
-                    <ul className="list-disc ml-5 mt-2 space-y-1 text-slate-700 text-sm">
-                      {(recipe.materials || []).map((item) => (
-                        <li key={`${recipe.id}-${item.id || `${item.rm_name}-${item.quantity}`}`}>
-                          {item.rm_name}: {item.quantity} kg
-                        </li>
-                      ))}
-                    </ul>
                   </div>
                 ))}
               </div>
@@ -632,7 +678,7 @@ const handleClosePinModal = () => {
                         type="button"
                         onClick={() => requestPin(
                           () => openEditProductTypeModal(t),
-                          { title: 'PIN Required', message: 'Enter PIN to edit (1234) product type.' }
+                          { title: 'PIN Required', message: 'Enter PIN to edit (1234) product type.', pinType: 'recipe_access' }
                         )}
                         className="px-3 py-1 rounded border border-gray-400 text-xs text-gray-800 hover:bg-gray-100"
                       >
@@ -642,7 +688,7 @@ const handleClosePinModal = () => {
                         type="button"
                         onClick={() => requestPin(
                           () => deleteProductType(t),
-                          { title: 'PIN Required', message: 'Enter PIN to delete product type.' }
+                          { title: 'PIN Required', message: 'Enter PIN to delete product type.', pinType: 'recipe_access' }
                         )}
                         className="px-3 py-1 rounded border border-red-300 text-xs text-red-700 hover:bg-red-50"
                       >
@@ -749,6 +795,55 @@ const handleClosePinModal = () => {
             </button>
           </div>
         </form>
+      </Modal>
+
+      <Modal open={Boolean(viewingRecipe)} onClose={closeViewRecipeModal} title="Recipe Details">
+        {viewingRecipe && (
+          <div className="space-y-4">
+            <div className="bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
+              <p className="text-sm font-semibold text-slate-800">{viewingRecipe.name}</p>
+              <p className="text-xs text-slate-500 mt-1">
+                Last Modified: {formatDateTimeIST(viewingRecipe.last_modified_at || viewingRecipe.created_at)}
+              </p>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-slate-700 mb-2">
+                Materials ({Array.isArray(viewingRecipe.materials) ? viewingRecipe.materials.length : 0})
+              </p>
+              {Array.isArray(viewingRecipe.materials) && viewingRecipe.materials.length > 0 ? (
+                <div className="max-h-[260px] overflow-y-auto overflow-x-auto rounded border border-slate-200">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-100 text-slate-700">
+                      <tr>
+                        <th className="px-3 py-2 text-left border-b border-slate-200">Raw Material</th>
+                        <th className="px-3 py-2 text-right border-b border-slate-200">Weight (kg)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {viewingRecipe.materials.map((item, idx) => (
+                        <tr key={`view-recipe-${viewingRecipe.id || viewingRecipe.name}-${idx}`} className="border-b border-slate-100 last:border-b-0">
+                          <td className="px-3 py-2 text-slate-700">{item.rm_name}</td>
+                          <td className="px-3 py-2 text-right text-slate-700">{item.quantity}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-sm text-slate-500">No materials added.</p>
+              )}
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={closeViewRecipeModal}
+                className="px-4 py-2 rounded border border-gray-400 text-sm text-gray-800 hover:bg-gray-100"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       <Modal open={showEditRmType} onClose={closeEditRmTypeModal} title="Edit Raw Material Type">

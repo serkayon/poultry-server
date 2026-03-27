@@ -5,3 +5,7 @@
 >>>>> cd frontend && npm run dev                                             >>>> for poultry dashboard
 
 
+git add .
+git commit -m "updated feature"
+git push
+git pull

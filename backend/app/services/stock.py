@@ -1,12 +1,14 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models.dispatch import DispatchEntry, DispatchProduct
 from ..models.production import ProductionBatch, ProductionBatchMaterial
 from ..models.raw_material import RawMaterialEntry
 from ..models.stock import FeedStock, RMStockLedger
+
+IST_OFFSET = timedelta(hours=5, minutes=30)
 
 
 def _start_of_day(dt: datetime) -> datetime:
@@ -40,6 +42,29 @@ def _feed_variant_label(feed_type: str, bag_weight_grams: int | None) -> str:
     return f"{feed_type} ({label})"
 
 
+def _normalize_feed_type(feed_type: str | None) -> str:
+    return str(feed_type or "").strip()
+
+
+def _normalize_batch_run_count(value: float | int | None) -> float:
+    try:
+        count = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, count)
+
+
+def calculate_rm_consumption_quantity(
+    per_batch_quantity: float | int | None,
+    batch_run_count: float | int | None,
+) -> float:
+    try:
+        quantity = float(per_batch_quantity or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, quantity) * _normalize_batch_run_count(batch_run_count)
+
+
 def _latest_rm_closing(
     db: Session,
     client_id: int,
@@ -66,16 +91,23 @@ def _latest_feed_closing(
     day: datetime,
     bag_weight_grams: int | None = None,
 ) -> float:
+    normalized_feed_type = _normalize_feed_type(feed_type)
+    if not normalized_feed_type:
+        return 0.0
     query = select(FeedStock).where(
         FeedStock.client_id == client_id,
-        FeedStock.feed_type == feed_type,
+        func.lower(func.trim(FeedStock.feed_type)) == normalized_feed_type.lower(),
         FeedStock.date < day,
     )
     if bag_weight_grams is None:
         query = query.where(FeedStock.bag_weight_grams.is_(None))
     else:
         query = query.where(FeedStock.bag_weight_grams == bag_weight_grams)
-    latest = db.execute(query.order_by(FeedStock.date.desc()).limit(1)).scalars().one_or_none()
+    latest = (
+        db.execute(query.order_by(FeedStock.date.desc(), FeedStock.id.desc()).limit(1))
+        .scalars()
+        .one_or_none()
+    )
     return float(latest.closing_stock if latest else 0)
 
 
@@ -118,10 +150,14 @@ def _get_or_create_feed_row(
     date: datetime,
     bag_weight_grams: int | None = None,
 ) -> FeedStock:
+    normalized_feed_type = _normalize_feed_type(feed_type)
+    if not normalized_feed_type:
+        raise ValueError("feed_type is required")
+
     day = _start_of_day(date)
     query = select(FeedStock).where(
         FeedStock.client_id == client_id,
-        FeedStock.feed_type == feed_type,
+        func.lower(func.trim(FeedStock.feed_type)) == normalized_feed_type.lower(),
         FeedStock.date == day,
     )
     if bag_weight_grams is None:
@@ -129,21 +165,21 @@ def _get_or_create_feed_row(
     else:
         query = query.where(FeedStock.bag_weight_grams == bag_weight_grams)
 
-    row = db.execute(query).scalars().one_or_none()
+    row = db.execute(query.order_by(FeedStock.id.desc()).limit(1)).scalars().one_or_none()
     if row:
         return row
 
     opening = _latest_feed_closing(
         db=db,
         client_id=client_id,
-        feed_type=feed_type,
+        feed_type=normalized_feed_type,
         day=day,
         bag_weight_grams=bag_weight_grams,
     )
     row = FeedStock(
         client_id=client_id,
         date=day,
-        feed_type=feed_type,
+        feed_type=normalized_feed_type,
         bag_weight_grams=bag_weight_grams,
         opening_stock=opening,
         produced=0,
@@ -219,11 +255,14 @@ def add_feed_produced(
     date: datetime,
     weight_per_bag: float | int | None = None,
 ) -> None:
+    normalized_feed_type = _normalize_feed_type(feed_type)
+    if not normalized_feed_type:
+        raise ValueError("feed_type is required")
     bag_weight_grams = _normalize_bag_weight_grams(weight_per_bag)
     row = _get_or_create_feed_row(
         db=db,
         client_id=client_id,
-        feed_type=feed_type,
+        feed_type=normalized_feed_type,
         date=date,
         bag_weight_grams=bag_weight_grams,
     )
@@ -244,15 +283,18 @@ def add_feed_dispatched(
     weight_per_bag: float | int | None = None,
 ) -> None:
     qty = float(quantity)
+    normalized_feed_type = _normalize_feed_type(feed_type)
+    if not normalized_feed_type:
+        raise ValueError("feed_type is required")
     bag_weight_grams = _normalize_bag_weight_grams(weight_per_bag)
-    variant_label = _feed_variant_label(feed_type, bag_weight_grams)
+    variant_label = _feed_variant_label(normalized_feed_type, bag_weight_grams)
     if qty <= 0:
         raise ValueError(f"Dispatch quantity for {variant_label} must be greater than 0")
 
     row = _get_or_create_feed_row(
         db=db,
         client_id=client_id,
-        feed_type=feed_type,
+        feed_type=normalized_feed_type,
         date=date,
         bag_weight_grams=bag_weight_grams,
     )
@@ -312,6 +354,7 @@ def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
                 ProductionBatch.date,
                 ProductionBatchMaterial.rm_name,
                 ProductionBatchMaterial.quantity,
+                ProductionBatch.batch_size,
             )
             .join(ProductionBatch, ProductionBatch.id == ProductionBatchMaterial.batch_id)
             .where(ProductionBatch.client_id == client_id)
@@ -323,12 +366,18 @@ def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
         )
         .all()
     )
-    for date, rm_name, quantity in consumption_rows:
+    for date, rm_name, quantity, batch_size in consumption_rows:
+        consumption_quantity = calculate_rm_consumption_quantity(
+            per_batch_quantity=quantity,
+            batch_run_count=batch_size,
+        )
+        if consumption_quantity <= 0:
+            continue
         add_rm_consumption(
             db=db,
             client_id=client_id,
             rm_name=rm_name,
-            quantity=float(quantity),
+            quantity=consumption_quantity,
             date=date,
         )
 
@@ -385,11 +434,14 @@ def rebuild_feed_stock_ledger(db: Session, client_id: int) -> None:
         .all()
     )
     for date, product_type, weight_per_bag, total_weight in dispatch_rows:
+        # Dispatch entries are stored in UTC-naive form after API parsing.
+        # Shift to IST wall clock before daily ledger bucketing.
+        ledger_date = date + IST_OFFSET
         add_feed_dispatched(
             db=db,
             client_id=client_id,
             feed_type=product_type,
             quantity=float(total_weight),
-            date=date,
+            date=ledger_date,
             weight_per_bag=weight_per_bag,
         )

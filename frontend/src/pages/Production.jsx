@@ -23,6 +23,34 @@ import {
 const NUTRITION_FIELDS = ['protein', 'fat', 'fiber', 'ash', 'calcium', 'phosphorus', 'salt']
 const PHYSICAL_FIELDS = ['hm_retention', 'mixer_moisture', 'conditioner_moisture', 'moisture_addition', 'final_feed_moisture', 'water_activity', 'hardness', 'pellet_diameter', 'fines']
 const EMPTY_MATERIAL_ROW = { rm_name: '', quantity: '' }
+const DATE_RANGE_OPTIONS = [
+  { value: 'today', label: 'Today' },
+  { value: 'last_7', label: 'Last 7 Days' },
+  { value: 'last_15', label: 'Last 15 Days' },
+  { value: 'last_30', label: 'Last 30 Days' },
+  { value: 'custom', label: 'Custom' },
+]
+
+const shiftDateInput = (dateInput, days) => {
+  const parsed = new Date(`${dateInput}T00:00:00Z`)
+  if (Number.isNaN(parsed.getTime())) return dateInput
+  parsed.setUTCDate(parsed.getUTCDate() + days)
+  return parsed.toISOString().slice(0, 10)
+}
+
+const resolveDateRange = (rangeType) => {
+  const today = todayDateInputIST()
+  if (rangeType === 'last_7') {
+    return { fromDate: shiftDateInput(today, -6), toDate: today }
+  }
+  if (rangeType === 'last_15') {
+    return { fromDate: shiftDateInput(today, -14), toDate: today }
+  }
+  if (rangeType === 'last_30') {
+    return { fromDate: shiftDateInput(today, -29), toDate: today }
+  }
+  return { fromDate: today, toDate: today }
+}
 
 const initialBatchForm = () => ({
   batch_no: '',
@@ -85,10 +113,11 @@ export default function Production() {
   const [showConsumptionReport, setShowConsumptionReport] = useState(false)
   const { requestPin, pinDialog } = usePinGate()
 
-  const [fromDate, setFromDate] = useState("")
-const [toDate, setToDate] = useState("")
-const [productFilter, setProductFilter] = useState("")
-const [search, setSearch] = useState("");
+  const [dateRangeType, setDateRangeType] = useState('today')
+  const [fromDate, setFromDate] = useState(todayDateInputIST())
+  const [toDate, setToDate] = useState(todayDateInputIST())
+  const [productFilter, setProductFilter] = useState("")
+  const [search, setSearch] = useState("");
 
 const reportRef = useRef(null);
 const consumptionRef = useRef(null);
@@ -153,18 +182,25 @@ const loadAvailableRawMaterialStock = () => {
     .finally(() => setRmStockLoading(false))
 }
 
-
-// const filteredBatches = batches.filter(b => {
-//   const batchDate = b.date?.slice(0,10)
-//     // const batchDate = b.date
-//    console.log("Batch:", batchDate)
-
-//   return (
-//     (productFilter ? b.product_name === productFilter : true) &&
-//     (fromDate ? batchDate >= fromDate : true) &&
-//     (toDate ? batchDate <= toDate : true)
-//   )
-// })
+const normalizedFromDate = fromDate && toDate && fromDate > toDate ? toDate : fromDate
+const normalizedToDate = fromDate && toDate && fromDate > toDate ? fromDate : toDate
+const currentMonthPrefix = todayDateInputIST().slice(0, 7)
+const currentMonthProductionKg = batches.reduce((sum, batch) => {
+  const batchDate = toDateInputIST(batch?.date, '')
+  if (!batchDate.startsWith(currentMonthPrefix)) return sum
+  const output = Number(batch?.output || 0)
+  return sum + (Number.isFinite(output) ? output : 0)
+}, 0)
+const currentMonthProductionMt = currentMonthProductionKg / 1000
+const currentMonthLabel = new Intl.DateTimeFormat('en-IN', {
+  month: 'long',
+  year: 'numeric',
+  timeZone: 'Asia/Kolkata',
+}).format(new Date())
+const currentMonthProductionDisplay = currentMonthProductionMt.toLocaleString('en-IN', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
 
 const filteredBatches = batches.filter(b => {
   const batchDate = toDateInputIST(b.date, "")
@@ -172,8 +208,8 @@ const filteredBatches = batches.filter(b => {
 
   return (
     (productFilter ? b.product_name === productFilter : true) &&
-    (fromDate ? batchDate >= fromDate : true) &&
-    (toDate ? batchDate <= toDate : true) &&
+    (normalizedFromDate ? batchDate >= normalizedFromDate : true) &&
+    (normalizedToDate ? batchDate <= normalizedToDate : true) &&
     (
       b.product_name?.toLowerCase().includes(searchText) ||
       String(b.batch_no || b.id).toLowerCase().includes(searchText) ||
@@ -183,6 +219,16 @@ const filteredBatches = batches.filter(b => {
     )
   )
 })
+
+const buildDownloadParams = () => {
+  const params = {}
+  const fromDateTime = toApiDateTimeFromDateInput(normalizedFromDate)
+  const toDateTime = toApiDateTimeFromDateInput(normalizedToDate, true)
+  if (fromDateTime) params.from_date = fromDateTime
+  if (toDateTime) params.to_date = toDateTime
+  if (productFilter) params.product_name = productFilter
+  return params
+}
 
 useEffect(() => {
   setPage(1)
@@ -198,19 +244,54 @@ useEffect(() => {
 }, [])
 
 useEffect(() => {
+  if (dateRangeType === 'custom') return
+  const range = resolveDateRange(dateRangeType)
+  setFromDate(range.fromDate)
+  setToDate(range.toDate)
+}, [dateRangeType])
+
+useEffect(() => {
   if (!showReport || reportModalMode !== 'edit') return
   loadAvailableRawMaterialStock()
 }, [showReport, reportModalMode])
 
 useEffect(() => {
   setPage(1)
-}, [fromDate, toDate, productFilter])
+}, [fromDate, toDate, productFilter, dateRangeType])
 
 const totalPages = Math.ceil(filteredBatches.length / pageSize)
 const paginatedBatches = filteredBatches.slice(
   (page - 1) * pageSize,
   page * pageSize
 )
+const periodBatches = batches.filter((batch) => {
+  const batchDate = toDateInputIST(batch?.date, '')
+  return (
+    (productFilter ? batch.product_name === productFilter : true) &&
+    (normalizedFromDate ? batchDate >= normalizedFromDate : true) &&
+    (normalizedToDate ? batchDate <= normalizedToDate : true)
+  )
+})
+const periodBatchLabel = (
+  dateRangeType === 'today'
+    ? 'today'
+    : dateRangeType === 'last_7'
+      ? 'last 7 days'
+      : dateRangeType === 'last_15'
+        ? 'last 15 days'
+        : dateRangeType === 'last_30'
+          ? 'last 30 days'
+        : 'selected period'
+)
+
+useEffect(() => {
+  if (!selectedBatch) return
+  const stillInPeriodList = periodBatches.some((batch) => batch.id === selectedBatch.id)
+  if (stillInPeriodList) return
+  setSelectedBatch(null)
+  setBatchDetail(null)
+  setShowConsumptionReport(false)
+}, [periodBatches, selectedBatch])
 
 useEffect(() => {
   if (successMsg) {
@@ -622,7 +703,7 @@ useEffect(() => {
   }
 
   const download = (format) => {
-    productionApi.download(format).then(({ data }) => {
+    productionApi.download(format, buildDownloadParams()).then(({ data }) => {
       const ext = format === 'pdf' ? 'pdf' : format === 'xlsx' || format === 'excel' ? 'xlsx' : 'csv'
       const url = URL.createObjectURL(new Blob([data]))
       const a = document.createElement('a')
@@ -641,6 +722,18 @@ useEffect(() => {
     const a = document.createElement("a")
     a.href = url
     a.download = `batch_${batchId}_report.${ext}`
+    a.click()
+    URL.revokeObjectURL(url)
+  })
+}
+
+const downloadConsumptionReport = (batchId, format) => {
+  productionApi.downloadBatchConsumption(batchId, format).then(({ data }) => {
+    const ext = format === "pdf" ? "pdf" : "xlsx"
+    const url = URL.createObjectURL(new Blob([data]))
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `batch_${batchId}_consumption_report.${ext}`
     a.click()
     URL.revokeObjectURL(url)
   })
@@ -676,11 +769,14 @@ const getRecipeMaterials = (productName) => {
 
     {/* content */}
     <div className="relative z-10 px-6">
+      <p className="text-sm font-medium text-[#7a2e0e]/90">
+        {currentMonthLabel}
+      </p>
       <p className="text-2xl font-semibold text-[#7a2e0e]">
         Total Production
       </p>
       <p className="text-3xl font-bold text-[#7a2e0e]">
-        1,250 <span className="text-base font-medium">MT</span>
+        {currentMonthProductionDisplay} <span className="text-base font-medium">MT</span>
       </p>
     </div>
   </div>
@@ -822,89 +918,75 @@ const getRecipeMaterials = (productName) => {
         <div className="overflow-x-auto">
           <div className="bg-primary-card border border-gray-300 rounded-xl ">
 
-  <div className="p-4 bg-white border-b border-gray-100 flex flex-wrap gap-4">
-    {/* SEARCH */}
-<div>
-  <label className="block text-xs text-gray-500 mb-1">Search</label>
+  <div className="p-4 bg-white border-b border-gray-100 flex flex-wrap gap-4 items-end">
+    <div>
+      <label className="block text-xs text-gray-500 mb-1">Search</label>
+      <div className="relative">
+        <img
+          src={searchIcon}
+          alt="search"
+          className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 opacity-60"
+        />
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search..."
+          className="pl-9 pr-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm w-52 focus:ring-2 focus:ring-[#2F5D5D]"
+        />
+      </div>
+    </div>
 
-  <div className="relative">
-    <img
-      src={searchIcon}
-      alt="search"
-      className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 opacity-60"
-    />
-
-    <input
-      type="text"
-      value={search}
-      onChange={(e) => setSearch(e.target.value)}
-      placeholder="Search..."
-      className="pl-9 pr-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm w-52 focus:ring-2 focus:ring-[#2F5D5D]"
-    />
-  </div>
-</div>
-
-  <div>
-    <label className="block text-xs text-gray-500 mb-1">Date From</label>
-    {/* <input
-      type="date"
-      value={filters.from_date}
-      onChange={(e) =>
-        setFilters(f => ({ ...f, from_date: e.target.value }))
-      }
-      className="px-3 py-2 rounded-lg border border-gray-300 text-sm"
-    /> */}
-
-    <input
-  type="date"
-  value={fromDate}
-  onChange={(e) => setFromDate(e.target.value)}
-  className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm"
-/>
-  </div>
-
-  <div>
-    <label className="block text-xs text-gray-500 mb-1">Date To</label>
-    {/* <input
-      type="date"
-      value={filters.to_date}
-      onChange={(e) =>
-        setFilters(f => ({ ...f, to_date: e.target.value }))
-      }
-      className="px-3 py-2 rounded-lg border border-gray-300 text-sm"
-    /> */}
-
-<input
-  type="date"
-  value={toDate}
-  onChange={(e) => setToDate(e.target.value)}
-  className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm"
-/>
-  </div>
-
-  <div>
-    <label className="block text-xs text-gray-500 mb-1">Product</label>
-    {/* <select
-      value={filters.product_name}
-      onChange={(e) =>
-        setFilters(f => ({ ...f, product_name: e.target.value }))
-      }
-      className="px-3 py-2 rounded-lg border border-gray-300 text-sm"
-    > */}
-
+    <div>
+      <label className="block text-xs text-gray-500 mb-1">Product Type</label>
       <select
-  value={productFilter}
-  onChange={(e) => setProductFilter(e.target.value)}
-  className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm"
->
-      <option value="">All</option>
-      {productTypes.map(t => (
-    <option key={t} value={t}>{t}</option>
-      ))}
-    </select>
-  </div>
+        value={productFilter}
+        onChange={(e) => setProductFilter(e.target.value)}
+        className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm min-w-[150px]"
+      >
+        <option value="">All</option>
+        {productTypes.map((type) => (
+          <option key={type} value={type}>{type}</option>
+        ))}
+      </select>
+    </div>
 
-</div>
+    <div>
+      <label className="block text-xs text-gray-500 mb-1">Period</label>
+      <select
+        value={dateRangeType}
+        onChange={(e) => setDateRangeType(e.target.value)}
+        className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm min-w-[150px]"
+      >
+        {DATE_RANGE_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </div>
+
+    {dateRangeType === 'custom' && (
+      <>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">From</label>
+          <input
+            type="date"
+            value={fromDate}
+            onChange={(e) => setFromDate(e.target.value)}
+            className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm"
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">To</label>
+          <input
+            type="date"
+            value={toDate}
+            onChange={(e) => setToDate(e.target.value)}
+            className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm"
+          />
+        </div>
+      </>
+    )}
+  </div>
 </div>
 
 
@@ -983,7 +1065,11 @@ const getRecipeMaterials = (productName) => {
     <button
       onClick={() => requestPin(
         () => openReportModal(b, 'edit'),
-        { title: 'PIN Required', message: 'Enter PIN to edit (1234) batch details.' }
+        {
+          title: 'PIN Required',
+          message: 'Enter PIN to edit (1234) batch details.',
+          pinType: 'production_details_edit',
+        }
       )}
     className={`px-2 py-1 text-xs  border rounded hover:bg-gray-100 
     ${b.mop && b.water 
@@ -997,7 +1083,11 @@ const getRecipeMaterials = (productName) => {
       <button
         onClick={() => requestPin(
           () => openReportModal(b, 'report'),
-          { title: 'PIN Required', message: 'Enter PIN to edit/add batch report.' }
+          {
+            title: 'PIN Required',
+            message: 'Enter PIN to edit/add batch report.',
+            pinType: 'production_report_access',
+          }
         )}
         className="px-2 py-1 text-xs bg-blue-600 text-white rounded"
       >
@@ -1005,13 +1095,19 @@ const getRecipeMaterials = (productName) => {
       </button>
     ) : (
       <button
-        onClick={() =>{
-           selectBatch(b);
-           setTimeout(() => {
-        reportRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }, 100); // small delay ensures report renders
-    }
-        }
+        onClick={() => requestPin(
+          () => {
+            selectBatch(b);
+            setTimeout(() => {
+              reportRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }, 100) // small delay ensures report renders
+          },
+          {
+            title: 'PIN Required',
+            message: 'Enter PIN to view batch report.',
+            pinType: 'production_report_access',
+          }
+        )}
         className="px-2 py-1 text-xs bg-blue-600 text-white rounded"
       >
         View Report
@@ -1069,10 +1165,10 @@ const getRecipeMaterials = (productName) => {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
          <div ref={reportRef}>
         <div>
-          <h2 className="text-sm font-medium text-gray-900 mb-3">Batches run today (select to view)</h2>
+          <h2 className="text-sm font-medium text-gray-900 mb-3">Batches for {periodBatchLabel} (select to view)</h2>
           <div className="space-y-2">
-            {batches.length === 0 && <p className="text-gray-900 text-sm">No batches for today.</p>}
-            {paginatedBatches.map((b) => (
+            {periodBatches.length === 0 && <p className="text-gray-900 text-sm">No batches for selected period.</p>}
+            {periodBatches.map((b) => (
               <button
                 key={b.id}
                 onClick={() => selectBatch(b)}
@@ -1169,7 +1265,11 @@ const getRecipeMaterials = (productName) => {
                 <button
                   onClick={() => requestPin(
                     () => openReportModal(selectedBatch, 'report'),
-                    { title: 'PIN Required', message: 'Enter PIN to edit (1234) chemical and physical report values.' }
+                    {
+                      title: 'PIN Required',
+                      message: 'Enter PIN to edit (1234) chemical and physical report values.',
+                      pinType: 'production_report_access',
+                    }
                   )}
                   className="px-4 py-2 rounded-lg bg-[#245658] text-primary font-medium"
                 >
@@ -1205,6 +1305,20 @@ const getRecipeMaterials = (productName) => {
                   <p className="text-sm font-semibold text-red-700">CONSUMPTION REPORT</p>
                   <p className="text-sm text-red-700">Consumption calculated on basis of total Batch Count * total weight of that batch.</p>
                   <p className="text-sm text-red-700">All RM materials used in this batch are shown below.</p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => downloadConsumptionReport(selectedBatch.id, "pdf")}
+                      className="px-3 py-1.5 text-xs bg-red-500 text-white rounded"
+                    >
+                      Download Consumption PDF
+                    </button>
+                    <button
+                      onClick={() => downloadConsumptionReport(selectedBatch.id, "xlsx")}
+                      className="px-3 py-1.5 text-xs bg-green-600 text-white rounded"
+                    >
+                      Download Consumption Excel
+                    </button>
+                  </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm border border-gray-400">
                       <thead>

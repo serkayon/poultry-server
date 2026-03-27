@@ -2,14 +2,27 @@ import React from 'react'
 import { useState, useEffect } from 'react'
 import { rawMaterial, stockApi } from '../api/client'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
-import { formatDateIST } from "../utils/datetime";
+import {
+  formatDateIST,
+  toApiDateTimeFromDateInput,
+  toDateInputIST,
+  todayDateInputIST,
+} from "../utils/datetime";
 
 const STOCK_RANGE_OPTIONS = [
   { value: 'today', label: 'Today' },
   { value: 'last_7_days', label: 'Last 7 Days' },
   { value: 'last_15_days', label: 'Last 15 Days' },
   { value: 'last_30_days', label: 'Last 30 Days' },
+  { value: 'custom', label: 'Custom' },
 ]
+
+const shiftDateInput = (dateInput, days) => {
+  const parsed = new Date(`${dateInput}T00:00:00Z`)
+  if (Number.isNaN(parsed.getTime())) return dateInput
+  parsed.setUTCDate(parsed.getUTCDate() + days)
+  return parsed.toISOString().slice(0, 10)
+}
 
 export default function Stock() {
   const [rmStock, setRmStock] = useState([])
@@ -17,6 +30,10 @@ export default function Stock() {
   const [rmTypes, setRmTypes] = useState([])
   const [rmRange, setRmRange] = useState('today')
   const [feedRange, setFeedRange] = useState('today')
+  const [rmFromDate, setRmFromDate] = useState(todayDateInputIST())
+  const [rmToDate, setRmToDate] = useState(todayDateInputIST())
+  const [feedFromDate, setFeedFromDate] = useState(todayDateInputIST())
+  const [feedToDate, setFeedToDate] = useState(todayDateInputIST())
 
   useEffect(() => {
     stockApi.rm().then(({ data }) => setRmStock(data || [])).catch(() => setRmStock([]))
@@ -140,16 +157,52 @@ export default function Stock() {
   const feedChartData = feedAvailableStockRows.map(({ name, closing }) => ({ name, closing }))
   const rmChartData = rmAvailableStock.map(({ name, closing }) => ({ name, closing }))
 
-  const buildDownloadRangeParams = (rangeKey) => {
-    const { start, end } = resolveDateRange(rangeKey)
-    return {
-      from_date: start.toISOString(),
-      to_date: end.toISOString(),
+  const resolveRangeDates = (rangeKey, customFrom, customTo) => {
+    const today = todayDateInputIST()
+    if (rangeKey === 'today') {
+      return { from: today, to: today }
     }
+
+    if (rangeKey === 'last_7_days') {
+      return { from: shiftDateInput(today, -6), to: today }
+    }
+
+    if (rangeKey === 'last_15_days') {
+      return { from: shiftDateInput(today, -14), to: today }
+    }
+    if (rangeKey === 'last_30_days') {
+      return { from: shiftDateInput(today, -29), to: today }
+    }
+
+    const from = String(customFrom || '').trim()
+    const to = String(customTo || '').trim()
+    if (!from && !to) {
+      return { from: '', to: '' }
+    }
+    if (!from) {
+      return { from: to, to }
+    }
+    if (!to) {
+      return { from, to: from }
+    }
+    return from <= to ? { from, to } : { from: to, to: from }
+  }
+
+  const buildDownloadRangeParams = (rangeKey, customFrom, customTo) => {
+    const { from, to } = resolveRangeDates(rangeKey, customFrom, customTo)
+    const params = {}
+    const fromDate = toApiDateTimeFromDateInput(from)
+    const toDate = toApiDateTimeFromDateInput(to, true)
+    if (fromDate) params.from_date = fromDate
+    if (toDate) params.to_date = toDate
+    return params
   }
 
   const downloadRm = (format, rangeKey = rmRange) => {
-    stockApi.downloadRM(format, buildDownloadRangeParams(rangeKey)).then(({ data }) => {
+    stockApi.downloadRM(
+      format,
+      buildDownloadRangeParams(rangeKey, rmFromDate, rmToDate)
+    ).then(({ data }) => {
       const ext = format === 'pdf' ? 'pdf' : 'xlsx'
       const url = URL.createObjectURL(new Blob([data]))
       const a = document.createElement('a')
@@ -161,7 +214,10 @@ export default function Stock() {
   }
 
   const downloadFeed = (format, rangeKey = feedRange) => {
-    stockApi.downloadFeed(format, buildDownloadRangeParams(rangeKey)).then(({ data }) => {
+    stockApi.downloadFeed(
+      format,
+      buildDownloadRangeParams(rangeKey, feedFromDate, feedToDate)
+    ).then(({ data }) => {
       const ext = format === 'pdf' ? 'pdf' : 'xlsx'
       const url = URL.createObjectURL(new Blob([data]))
       const a = document.createElement('a')
@@ -184,32 +240,22 @@ export default function Stock() {
     })
   }
 
-  const resolveDateRange = (rangeKey) => {
-    const end = new Date()
-    end.setHours(23, 59, 59, 999)
-    const start = new Date(end)
-    start.setHours(0, 0, 0, 0)
-
-    if (rangeKey === 'last_7_days') {
-      start.setDate(start.getDate() - 6)
-    } else if (rangeKey === 'last_15_days') {
-      start.setDate(start.getDate() - 14)
-    } else if (rangeKey === 'last_30_days') {
-      start.setDate(start.getDate() - 29)
-    }
-
-    return { start, end }
+  const inSelectedRange = (dateValue, rangeKey, customFrom, customTo) => {
+    const rowDate = toDateInputIST(dateValue, '')
+    if (!rowDate) return false
+    const { from, to } = resolveRangeDates(rangeKey, customFrom, customTo)
+    if (!from && !to) return true
+    if (!from) return rowDate <= to
+    if (!to) return rowDate >= from
+    return rowDate >= from && rowDate <= to
   }
 
-  const inSelectedRange = (dateValue, rangeKey) => {
-    const date = new Date(dateValue)
-    if (Number.isNaN(date.getTime())) return false
-    const { start, end } = resolveDateRange(rangeKey)
-    return date >= start && date <= end
-  }
-
-  const filteredRmStock = rmStock.filter((row) => inSelectedRange(row?.date, rmRange))
-  const filteredFeedStock = feedStock.filter((row) => inSelectedRange(row?.date, feedRange))
+  const filteredRmStock = rmStock.filter((row) => (
+    inSelectedRange(row?.date, rmRange, rmFromDate, rmToDate)
+  ))
+  const filteredFeedStock = feedStock.filter((row) => (
+    inSelectedRange(row?.date, feedRange, feedFromDate, feedToDate)
+  ))
   const filteredFeedStockGrouped = Object.values(
     filteredFeedStock.reduce((acc, row) => {
       const feedType = normalizeFeedType(row?.feed_type)
@@ -352,7 +398,15 @@ export default function Stock() {
           <div className="flex flex-wrap items-center gap-2">
             <select
               value={rmRange}
-              onChange={(e) => setRmRange(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value
+                setRmRange(next)
+                if (next === 'custom' && !rmFromDate && !rmToDate) {
+                  const today = todayDateInputIST()
+                  setRmFromDate(today)
+                  setRmToDate(today)
+                }
+              }}
               className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm bg-white"
             >
               {STOCK_RANGE_OPTIONS.map((option) => (
@@ -361,6 +415,22 @@ export default function Stock() {
                 </option>
               ))}
             </select>
+            {rmRange === 'custom' && (
+              <>
+                <input
+                  type="date"
+                  value={rmFromDate}
+                  onChange={(e) => setRmFromDate(e.target.value)}
+                  className="px-2 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm bg-white"
+                />
+                <input
+                  type="date"
+                  value={rmToDate}
+                  onChange={(e) => setRmToDate(e.target.value)}
+                  className="px-2 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm bg-white"
+                />
+              </>
+            )}
             <button onClick={() => downloadRm('pdf')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">PDF</button>
             <button onClick={() => downloadRm('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Excel</button>
           </div>
@@ -407,7 +477,15 @@ export default function Stock() {
           <div className="flex flex-wrap items-center gap-2">
             <select
               value={feedRange}
-              onChange={(e) => setFeedRange(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value
+                setFeedRange(next)
+                if (next === 'custom' && !feedFromDate && !feedToDate) {
+                  const today = todayDateInputIST()
+                  setFeedFromDate(today)
+                  setFeedToDate(today)
+                }
+              }}
               className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm bg-white"
             >
               {STOCK_RANGE_OPTIONS.map((option) => (
@@ -416,6 +494,22 @@ export default function Stock() {
                 </option>
               ))}
             </select>
+            {feedRange === 'custom' && (
+              <>
+                <input
+                  type="date"
+                  value={feedFromDate}
+                  onChange={(e) => setFeedFromDate(e.target.value)}
+                  className="px-2 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm bg-white"
+                />
+                <input
+                  type="date"
+                  value={feedToDate}
+                  onChange={(e) => setFeedToDate(e.target.value)}
+                  className="px-2 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm bg-white"
+                />
+              </>
+            )}
             <button onClick={() => downloadFeed('pdf')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">PDF</button>
             <button onClick={() => downloadFeed('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Excel</button>
           </div>

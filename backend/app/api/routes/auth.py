@@ -18,6 +18,27 @@ from ...services.auth import get_user_by_email, hash_password, verify_password
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 PIN_RE = re.compile(r"^\d{4}$")
+PIN_TYPE_FIELD_MAP = {
+    "settings": "settings_pin_hash",
+    "rm_entry_edit": "pin_rm_entry_edit_hash",
+    "rm_lab_edit": "pin_rm_lab_edit_hash",
+    "dispatch_edit": "pin_dispatch_edit_hash",
+    "production_details_edit": "pin_production_details_edit_hash",
+    "production_report_access": "pin_production_report_access_hash",
+    "recipe_access": "pin_recipe_access_hash",
+}
+
+
+def _normalize_pin_type(raw_value: object) -> str:
+    pin_type = str(raw_value or "settings").strip().lower()
+    if not pin_type:
+        pin_type = "settings"
+    if pin_type not in PIN_TYPE_FIELD_MAP:
+        raise ValueError(
+            "pin_type must be one of: "
+            + ", ".join(sorted(PIN_TYPE_FIELD_MAP.keys()))
+        )
+    return pin_type
 
 
 def _resolve_pin_user(db):
@@ -70,7 +91,13 @@ def vendor_signup():
         user = User(
             email=email,
             hashed_password=hash_password(password),
-            settings_pin_hash=hash_password("1234"),
+            settings_pin_hash="1234",
+            pin_rm_entry_edit_hash="1234",
+            pin_rm_lab_edit_hash="1234",
+            pin_dispatch_edit_hash="1234",
+            pin_production_details_edit_hash="1234",
+            pin_production_report_access_hash="1234",
+            pin_recipe_access_hash="1234",
             full_name=full_name,
             role=UserRole.vendor.value,
             company_name=payload.get("company_name"),
@@ -107,7 +134,13 @@ def vendor_create_customer():
         user = User(
             email=email,
             hashed_password=hash_password(password),
-            settings_pin_hash=hash_password("1234"),
+            settings_pin_hash="1234",
+            pin_rm_entry_edit_hash="1234",
+            pin_rm_lab_edit_hash="1234",
+            pin_dispatch_edit_hash="1234",
+            pin_production_details_edit_hash="1234",
+            pin_production_report_access_hash="1234",
+            pin_recipe_access_hash="1234",
             full_name=full_name,
             role=UserRole.customer.value,
             company_name=payload.get("company_name"),
@@ -143,6 +176,7 @@ def verify_settings_pin():
     try:
         payload = json_body()
         pin = str(required(payload, "pin")).strip()
+        pin_type = _normalize_pin_type(payload.get("pin_type"))
     except ValueError as exc:
         return error(str(exc))
 
@@ -154,10 +188,11 @@ def verify_settings_pin():
         if not user:
             return error("User not found", 404)
 
-        stored_pin_hash = user.settings_pin_hash or ""
-        if not stored_pin_hash or not verify_password(pin, stored_pin_hash):
+        pin_field = PIN_TYPE_FIELD_MAP[pin_type]
+        stored_pin_value = str(getattr(user, pin_field, "") or "").strip()
+        if not stored_pin_value or pin != stored_pin_value:
             return error("Invalid PIN", 401)
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "pin_type": pin_type})
 
 
 @auth_bp.post("/pin/change")
@@ -166,6 +201,7 @@ def change_settings_pin():
         payload = json_body()
         current_pin = str(required(payload, "current_pin")).strip()
         new_pin = str(required(payload, "new_pin")).strip()
+        pin_type = _normalize_pin_type(payload.get("pin_type"))
     except ValueError as exc:
         return error(str(exc))
 
@@ -179,10 +215,11 @@ def change_settings_pin():
         if not user:
             return error("User not found", 404)
 
-        stored_pin_hash = user.settings_pin_hash or ""
-        if not stored_pin_hash or not verify_password(current_pin, stored_pin_hash):
+        pin_field = PIN_TYPE_FIELD_MAP[pin_type]
+        stored_pin_value = str(getattr(user, pin_field, "") or "").strip()
+        if not stored_pin_value or current_pin != stored_pin_value:
             return error("Current PIN is incorrect", 401)
 
-        user.settings_pin_hash = hash_password(new_pin)
+        setattr(user, pin_field, new_pin)
         db.flush()
-        return jsonify({"ok": True, "detail": "PIN updated successfully"})
+        return jsonify({"ok": True, "detail": "PIN updated successfully", "pin_type": pin_type})

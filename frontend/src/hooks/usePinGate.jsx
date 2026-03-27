@@ -9,6 +9,7 @@ export default function usePinGate() {
     open: false,
     title: 'PIN Required',
     message: 'Enter 4-digit PIN.',
+    pinType: 'settings',
     onSuccess: null,
     onCancel: null,
   })
@@ -34,6 +35,7 @@ export default function usePinGate() {
       open: true,
       title: options.title || 'PIN Required',
       message: options.message || 'Enter 4-digit PIN.',
+      pinType: options.pinType || 'settings',
       onSuccess: typeof onSuccess === 'function' ? onSuccess : null,
       onCancel: typeof options.onCancel === 'function' ? options.onCancel : null,
     })
@@ -60,7 +62,7 @@ export default function usePinGate() {
 
     try {
       setSubmitting(true)
-      await auth.verifyPin(pin)
+      await auth.verifyPin(pin, prompt.pinType || 'settings')
       const onSuccess = prompt.onSuccess
       reset()
       if (onSuccess) {
@@ -70,7 +72,7 @@ export default function usePinGate() {
       setSubmitting(false)
       setError(err?.response?.data?.detail || 'Invalid PIN.')
     }
-  }, [pin, prompt.onSuccess, reset])
+  }, [pin, prompt.onSuccess, prompt.pinType, reset])
 
   useEffect(() => {
     if (!prompt.open) return

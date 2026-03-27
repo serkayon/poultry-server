@@ -11,7 +11,6 @@ import searchIcon from "./assets/icons8-search-60.png"
 import {
   formatDateTimeIST,
   parseApiDate,
-  toApiDateTimeFromDateInput,
   toDateInputIST,
   todayDateInputIST,
 } from "../utils/datetime"
@@ -20,6 +19,24 @@ const EMPTY_PRODUCT = { product_type: "", num_bags: "", weight_per_bag: "" }
 const IST_TIME_ZONE = "Asia/Kolkata"
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/
 const DEFAULT_TIME_PARTS = { hour: "12", minute: "00", meridiem: "AM" }
+const pad2 = (value) => String(value).padStart(2, "0")
+
+function shiftDateInput(dateInput, daysOffset) {
+  if (!DATE_ONLY_RE.test(String(dateInput || ""))) return ""
+  const date = new Date(`${dateInput}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return ""
+  date.setDate(date.getDate() + Number(daysOffset || 0))
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+}
+
+function toDateInputLocal(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+}
+
+function toApiDateTimeFromDateInputIST(dateInput, endOfDay = false) {
+  if (!DATE_ONLY_RE.test(String(dateInput || ""))) return null
+  return `${dateInput}T${endOfDay ? "23:59:59" : "00:00:00"}+05:30`
+}
 
 function getTimePartsIST(value) {
   const parsed = parseApiDate(value)
@@ -82,6 +99,13 @@ export default function Dispatch() {
   const [availableFeedStock, setAvailableFeedStock] = useState([])
   const [stockLoading, setStockLoading] = useState(false)
   const [search, setSearch] = useState('')
+  const [dateRangePreset, setDateRangePreset] = useState("today")
+  const [fromDate, setFromDate] = useState("")
+  const [toDate, setToDate] = useState("")
+  const [monthlySummary, setMonthlySummary] = useState({
+    finishedGoodsKg: 0,
+    dispatchedKg: 0,
+  })
 
   const [showAdd, setShowAdd] = useState(false)
   const [addError, setAddError] = useState('')
@@ -91,12 +115,41 @@ export default function Dispatch() {
   const [popupMessage, setPopupMessage] = useState('')
   const { requestPin, pinDialog } = usePinGate()
 
-  const [filters, setFilters] = useState({ from_date: '', to_date: '', product_type: '', party_name: '' })
+  const [filters, setFilters] = useState({ product_type: '' })
+  const todayDate = todayDateInputIST()
+  const monthAnchorDate = new Date(`${todayDate}T00:00:00`)
+  const currentMonthStart = toDateInputLocal(
+    new Date(monthAnchorDate.getFullYear(), monthAnchorDate.getMonth(), 1)
+  )
+  const currentMonthEnd = toDateInputLocal(
+    new Date(monthAnchorDate.getFullYear(), monthAnchorDate.getMonth() + 1, 0)
+  )
+  const currentMonthLabel = new Intl.DateTimeFormat("en-IN", {
+    timeZone: IST_TIME_ZONE,
+    month: "long",
+    year: "numeric",
+  }).format(monthAnchorDate)
 
-  const summaryCards = [
-    { title: "Total Finished Goods", value: "1,130", unit: "MT", bg: FinishedGoods },
-    { title: "Total Dispatched", value: "980", unit: "MT", bg: TruckLoad },
-  ]
+  const resolvedRange = (() => {
+    if (dateRangePreset === "custom") {
+      return {
+        from: fromDate || "",
+        to: toDate || "",
+      }
+    }
+    if (dateRangePreset === "last_7") {
+      return { from: shiftDateInput(todayDate, -6), to: todayDate }
+    }
+    if (dateRangePreset === "last_15") {
+      return { from: shiftDateInput(todayDate, -14), to: todayDate }
+    }
+    if (dateRangePreset === "last_30") {
+      return { from: shiftDateInput(todayDate, -29), to: todayDate }
+    }
+    return { from: todayDate, to: todayDate }
+  })()
+  const effectiveFromDate = resolvedRange.from
+  const effectiveToDate = resolvedRange.to
 
   const [form, setForm] = useState(emptyDispatchForm())
 
@@ -119,19 +172,13 @@ export default function Dispatch() {
 
   useEffect(() => {
     setCurrentPage(1)
-  }, [search])
-
-  useEffect(() => {
-    load()
-    setCurrentPage(1)
-  }, [filters.from_date, filters.to_date, filters.product_type, filters.party_name])
+  }, [search, filters.product_type, dateRangePreset, fromDate, toDate])
 
   const load = () => {
     const params = {}
-    if (filters.from_date) params.from_date = toApiDateTimeFromDateInput(filters.from_date)
-    if (filters.to_date) params.to_date = toApiDateTimeFromDateInput(filters.to_date, true)
+    if (effectiveFromDate) params.from_date = toApiDateTimeFromDateInputIST(effectiveFromDate)
+    if (effectiveToDate) params.to_date = toApiDateTimeFromDateInputIST(effectiveToDate, true)
     if (filters.product_type) params.product_type = filters.product_type
-    if (filters.party_name) params.party_name = filters.party_name
 
     dispatchApi.list(params)
       .then(({ data }) => {
@@ -142,6 +189,51 @@ export default function Dispatch() {
       })
       .catch(() => setList([]))
   }
+
+  const loadMonthlySummary = () => {
+    const monthRangeParams = {
+      from_date: toApiDateTimeFromDateInputIST(currentMonthStart),
+      to_date: toApiDateTimeFromDateInputIST(currentMonthEnd, true),
+    }
+
+    Promise.all([
+      stockApi.feed({ date: currentMonthStart }),
+      dispatchApi.list(monthRangeParams),
+    ])
+      .then(([feedRes, dispatchRes]) => {
+        const feedRows = Array.isArray(feedRes?.data) ? feedRes.data : []
+        const dispatchRows = Array.isArray(dispatchRes?.data) ? dispatchRes.data : []
+
+        const finishedGoodsKg = feedRows
+          .filter((row) => {
+            const dayKey = toDateInputIST(row?.date, "")
+            return dayKey >= currentMonthStart && dayKey <= currentMonthEnd
+          })
+          .reduce((sum, row) => sum + (Number(row?.produced) || 0), 0)
+
+        const dispatchedKg = dispatchRows.reduce((sum, row) => {
+          const directTotal = Number(row?.total_weight)
+          if (Number.isFinite(directTotal)) return sum + directTotal
+          const products = Array.isArray(row?.products) ? row.products : []
+          return (
+            sum +
+            products.reduce((acc, p) => acc + (Number(p?.total_weight) || 0), 0)
+          )
+        }, 0)
+
+        setMonthlySummary({ finishedGoodsKg, dispatchedKg })
+      })
+      .catch(() => setMonthlySummary({ finishedGoodsKg: 0, dispatchedKg: 0 }))
+  }
+
+  useEffect(() => {
+    load()
+    setCurrentPage(1)
+  }, [filters.product_type, effectiveFromDate, effectiveToDate])
+
+  useEffect(() => {
+    loadMonthlySummary()
+  }, [currentMonthStart, currentMonthEnd])
 
   useEffect(() => {
     configApi.productTypes().then(({ data }) => setProductTypes(Array.isArray(data) ? data : [])).catch(() => setProductTypes([]))
@@ -154,12 +246,21 @@ export default function Dispatch() {
       .then(({ data }) => {
         const rows = Array.isArray(data) ? data : []
         const availableRows = rows
-          .map((row) => ({
-            feed_type: String(row?.feed_type || '').trim(),
-            feed_variant: String(row?.feed_variant || row?.feed_type || '').trim(),
-            bag_weight_kg: row?.bag_weight_kg == null ? null : Number(row.bag_weight_kg),
-            quantity: Number(row?.quantity || 0),
-          }))
+          .map((row) => {
+            const bagWeightKg = row?.bag_weight_kg == null ? null : Number(row.bag_weight_kg)
+            const quantityKg = Number(row?.quantity || 0)
+            const availableBags =
+              Number.isFinite(bagWeightKg) && bagWeightKg > 0
+                ? quantityKg / bagWeightKg
+                : null
+            return {
+              feed_type: String(row?.feed_type || '').trim(),
+              feed_variant: String(row?.feed_variant || row?.feed_type || '').trim(),
+              bag_weight_kg: bagWeightKg,
+              quantity: quantityKg,
+              available_bags: availableBags,
+            }
+          })
           .filter((row) => row.feed_variant && Number.isFinite(row.quantity) && row.quantity > 0)
           .sort((a, b) => b.quantity - a.quantity)
         setAvailableFeedStock(availableRows)
@@ -308,6 +409,7 @@ export default function Dispatch() {
       setForm(emptyDispatchForm())
       setAddError('')
       load()
+      loadMonthlySummary()
     } catch (err) {
       const detail = err?.response?.data?.detail || 'Unable to create dispatch entry.'
       setAddError(detail)
@@ -385,6 +487,7 @@ export default function Dispatch() {
       setEditingId(null)
       setEditError('')
       load()
+      loadMonthlySummary()
     } catch (err) {
       const detail = err?.response?.data?.detail || 'Unable to update dispatch entry.'
       setEditError(detail)
@@ -394,7 +497,12 @@ export default function Dispatch() {
 
 
   const download = (format) => {
-    dispatchApi.download(format).then(({ data }) => {
+    const params = {}
+    if (effectiveFromDate) params.from_date = toApiDateTimeFromDateInputIST(effectiveFromDate)
+    if (effectiveToDate) params.to_date = toApiDateTimeFromDateInputIST(effectiveToDate, true)
+    if (filters.product_type) params.product_type = filters.product_type
+
+    dispatchApi.download(format, params).then(({ data }) => {
       const ext = format === 'pdf' ? 'pdf' : format === 'xlsx' || format === 'excel' ? 'xlsx' : 'csv'
       const url = URL.createObjectURL(new Blob([data]))
       const a = document.createElement('a')
@@ -428,6 +536,26 @@ export default function Dispatch() {
     }).catch(() => setPopupMessage('Failed to download invoice.'))
   }
 
+  const formatMt = (valueKg) => {
+    const safeKg = Math.max(0, Number(valueKg) || 0)
+    return (safeKg / 1000).toFixed(3)
+  }
+
+  const summaryCards = [
+    {
+      title: "Total Finished Goods",
+      value: formatMt(monthlySummary.finishedGoodsKg),
+      unit: "MT",
+      bg: FinishedGoods,
+    },
+    {
+      title: "Total Dispatched",
+      value: formatMt(monthlySummary.dispatchedKg),
+      unit: "MT",
+      bg: TruckLoad,
+    },
+  ]
+
   return (
     <div className="space-y-6">
       {/* SUMMARY CARDS */}
@@ -440,6 +568,9 @@ export default function Dispatch() {
             </div>
             <div className="relative z-10 flex items-center justify-between h-full px-4">
               <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-800">
+                  {currentMonthLabel}
+                </p>
                 <div className="flex items-center gap-2 text-orange-900 font-semibold text-xl">
                   <span>{card.title}</span>
                 </div>
@@ -480,23 +611,47 @@ export default function Dispatch() {
             </div>
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">Date From</label>
-            <input type="date" value={filters.from_date} onChange={(e) => setFilters((f) => ({ ...f, from_date: e.target.value }))} className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm" />
+            <label className="block text-xs text-gray-500 mb-1">Date Range</label>
+            <select
+              value={dateRangePreset}
+              onChange={(e) => setDateRangePreset(e.target.value)}
+              className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm"
+            >
+              <option value="today">Today</option>
+              <option value="last_7">Last 7 Days</option>
+              <option value="last_15">Last 15 Days</option>
+              <option value="last_30">Last 30 Days</option>
+              <option value="custom">Custom</option>
+            </select>
           </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Date To</label>
-            <input type="date" value={filters.to_date} onChange={(e) => setFilters((f) => ({ ...f, to_date: e.target.value }))} className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm" />
-          </div>
+          {dateRangePreset === "custom" && (
+            <>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Date From</label>
+                <input
+                  type="date"
+                  value={fromDate}
+                  onChange={(e) => setFromDate(e.target.value)}
+                  className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Date To</label>
+                <input
+                  type="date"
+                  value={toDate}
+                  onChange={(e) => setToDate(e.target.value)}
+                  className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm"
+                />
+              </div>
+            </>
+          )}
           <div>
             <label className="block text-xs text-gray-500 mb-1">Product Type</label>
             <select value={filters.product_type} onChange={(e) => setFilters((f) => ({ ...f, product_type: e.target.value }))} className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm">
               <option value="">All</option>
               {productTypes.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Party Name</label>
-            <input type="text" value={filters.party_name} onChange={(e) => setFilters((f) => ({ ...f, party_name: e.target.value }))} placeholder="Filter" className="px-3 py-2 rounded-lg border border-gray-300 text-slate-800 text-sm w-40" />
           </div>
         </div>
 
@@ -543,7 +698,11 @@ export default function Dispatch() {
                     <button
                       onClick={() => requestPin(
                         () => openEdit(r),
-                        { title: 'PIN Required', message: 'Enter PIN to edit (1234) dispatch entry.' }
+                        {
+                          title: 'PIN Required',
+                          message: 'Enter PIN to edit (1234) dispatch entry.',
+                          pinType: 'dispatch_edit',
+                        }
                       )}
                       className="px-2 py-1 text-xs border border-gray-500 rounded text-gray-900 hover:bg-gray-100"
                     >
@@ -634,6 +793,7 @@ export default function Dispatch() {
                       <tr className="bg-gray-200 text-gray-700">
                         <th className="px-3 py-2 text-left border-b border-gray-300">Product Variant</th>
                         <th className="px-3 py-2 text-right border-b border-gray-300">Bag Weight (kg)</th>
+                        <th className="px-3 py-2 text-right border-b border-gray-300">No. of Bags Available</th>
                         <th className="px-3 py-2 text-right border-b border-gray-300">Weight Available (kg)</th>
                       </tr>
                     </thead>
@@ -642,6 +802,7 @@ export default function Dispatch() {
                         <tr key={`available-stock-${row.feed_variant}-${row.bag_weight_kg ?? 'na'}`} className="bg-gray-50 text-gray-700 border-b border-gray-200 last:border-b-0">
                           <td className="px-3 py-2">{row.feed_variant}</td>
                           <td className="px-3 py-2 text-right">{row.bag_weight_kg == null ? 'N/A' : row.bag_weight_kg.toFixed(2)}</td>
+                          <td className="px-3 py-2 text-right">{row.available_bags == null ? 'N/A' : row.available_bags.toFixed(2)}</td>
                           <td className="px-3 py-2 text-right font-medium">{row.quantity.toFixed(2)}</td>
                         </tr>
                       ))}
@@ -870,6 +1031,7 @@ export default function Dispatch() {
                       <tr className="bg-gray-200 text-gray-700">
                         <th className="px-3 py-2 text-left border-b border-gray-300">Product Variant</th>
                         <th className="px-3 py-2 text-right border-b border-gray-300">Bag Weight (kg)</th>
+                        <th className="px-3 py-2 text-right border-b border-gray-300">No. of Bags Available</th>
                         <th className="px-3 py-2 text-right border-b border-gray-300">Weight Available (kg)</th>
                       </tr>
                     </thead>
@@ -878,6 +1040,7 @@ export default function Dispatch() {
                         <tr key={`available-stock-edit-${row.feed_variant}-${row.bag_weight_kg ?? 'na'}`} className="bg-gray-50 text-gray-700 border-b border-gray-200 last:border-b-0">
                           <td className="px-3 py-2">{row.feed_variant}</td>
                           <td className="px-3 py-2 text-right">{row.bag_weight_kg == null ? 'N/A' : row.bag_weight_kg.toFixed(2)}</td>
+                          <td className="px-3 py-2 text-right">{row.available_bags == null ? 'N/A' : row.available_bags.toFixed(2)}</td>
                           <td className="px-3 py-2 text-right font-medium">{row.quantity.toFixed(2)}</td>
                         </tr>
                       ))}

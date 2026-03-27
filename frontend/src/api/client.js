@@ -126,9 +126,9 @@ export const auth = {
   vendorCreateCustomer: (data) => client.post('/auth/vendor/customer-signup', data),
   demoVendor: () => client.post('/auth/demo/vendor'),
   demoCustomer: () => client.post('/auth/demo/customer'),
-  verifyPin: (pin) => client.post('/auth/pin/verify', { pin }),
-  changePin: (currentPin, newPin) =>
-    client.post('/auth/pin/change', { current_pin: currentPin, new_pin: newPin }),
+  verifyPin: (pin, pinType = 'settings') => client.post('/auth/pin/verify', { pin, pin_type: pinType }),
+  changePin: (currentPin, newPin, pinType = 'settings') =>
+    client.post('/auth/pin/change', { current_pin: currentPin, new_pin: newPin, pin_type: pinType }),
 }
 
 
@@ -151,7 +151,11 @@ export const rawMaterial = {
   downloadEntry: (id, format = 'pdf') => client.get(`/raw-material/${id}/download`, { params: { format }, responseType: 'blob' }),
   getLabReport: (entryId) => client.get(`/raw-material/lab-report/${entryId}`),
   submitLabReport: (data) => client.post('/raw-material/lab-report', data),
-  download: (format) => client.get('/raw-material/download', { params: { format }, responseType: 'blob' }),
+  download: (format, params = {}) =>
+    client.get('/raw-material/download', {
+      params: { format, ...params },
+      responseType: 'blob'
+    }),
 }
 
 export const dispatchApi = {
@@ -159,7 +163,11 @@ export const dispatchApi = {
   create: (data) => client.post('/dispatch', data),
   update: (id, data) => client.put(`/dispatch/${id}`, data),
   downloadEntry: (id, format = 'pdf') => client.get(`/dispatch/${id}/download`, { params: { format }, responseType: 'blob' }),
-  download: (format) => client.get('/dispatch/download', { params: { format }, responseType: 'blob' }),
+  download: (format, params = {}) =>
+    client.get('/dispatch/download', {
+      params: { format, ...params },
+      responseType: 'blob',
+    }),
   downloadInvoice: (id) => client.get(`/dispatch/${id}/invoice`, { responseType: 'blob' }),
 }
 
@@ -170,9 +178,9 @@ export const productionApi = {
   updateBatchDetails: (id, data) => client.put(`/production/batches/${id}/details`, data),
   submitReport: (data) => client.post('/production/report', data),
   consumptionReport: (params) => client.get('/production/consumption', { params }),
-  download: (format) =>
+  download: (format, params = {}) =>
     client.get('/production/download', {
-      params: { format },
+      params: { format, ...params },
       responseType: 'blob'
     }),
 
@@ -181,7 +189,13 @@ export const productionApi = {
     client.get(`/production/${id}/download`, {
       params: { format },
       responseType: 'blob'
-    }),}
+    }),
+  downloadBatchConsumption: (id, format = "pdf") =>
+    client.get(`/production/${id}/consumption/download`, {
+      params: { format },
+      responseType: 'blob'
+    }),
+}
 
 // export const stockApi = {
 //   rm: (params) => client.get('/stock/rm', { params }),
@@ -225,16 +239,16 @@ export const productionApi = {
     }),
 
   // ✅ Dispatch Report
-  downloadDispatch: (format = "pdf") =>
+  downloadDispatch: (format = "pdf", params = {}) =>
     client.get('/dispatch/download', {
-      params: { format },
+      params: { format, ...params },
       responseType: 'blob'
     }),
 
   // ✅ Production Report
-  downloadProduction: (format = "pdf") =>
+  downloadProduction: (format = "pdf", params = {}) =>
     client.get('/production/download', {
-      params: { format },
+      params: { format, ...params },
       responseType: 'blob'
     }),
 

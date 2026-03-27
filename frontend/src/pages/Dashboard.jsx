@@ -1,5 +1,5 @@
 import React from "react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 import { dispatchApi, plc, productionApi, stockApi } from "../api/client";
 import {
@@ -30,8 +30,8 @@ import {
 import {
   formatDateIST,
   formatTimeIST,
+  parseApiDate,
   toDateInputIST,
-  toApiDateTimeFromDateInput,
   todayDateInputIST,
 } from "../utils/datetime";
 
@@ -43,6 +43,7 @@ const chartColors = {
   feederSpeed: "#7c3aed",
   pressureBefore: "#0d9488",
   pressureAfter: "#ca8a04",
+  feederLoad: "#0f766e",
 };
 
 export default function Dashboard() {
@@ -50,6 +51,8 @@ export default function Dashboard() {
   const [plcHistory, setPlcHistory] = useState([]);
   const [machineStatus, setMachineStatus] = useState(null);
   const [dateTime, setDateTime] = useState(new Date());
+  const displayedBatchIdRef = useRef(null);
+  const hasGraphHistoryRef = useRef(false);
   const [todayMetrics, setTodayMetrics] = useState({
     rawMaterialStockKg: 0,
     currentDayDispatchKg: 0,
@@ -57,10 +60,29 @@ export default function Dashboard() {
     finishedGoodsStockKg: 0,
   });
 
-  const formatKg = (valueKg) => {
-    const safe = Math.max(0, Number(valueKg) || 0);
-    return safe.toFixed(2).replace(/\.?0+$/, "");
+  const formatMt = (valueKg) => {
+    const safeKg = Math.max(0, Number(valueKg) || 0);
+    const safeMt = safeKg / 1000;
+    return safeMt.toFixed(3);
   };
+
+  const toApiDateTimeFromDateInputIST = (dateInput, endOfDay = false) =>
+    `${dateInput}T${endOfDay ? "23:59:59" : "00:00:00"}+05:30`;
+
+  const formatTime24IST = (value, fallback = "") => {
+    const parsed = parseApiDate(value);
+    if (!parsed) return fallback;
+    return new Intl.DateTimeFormat("en-IN", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(parsed);
+  };
+
+  const fixedTicks = (maxValue) =>
+    Array.from({ length: 11 }, (_, idx) => (maxValue / 10) * idx);
 
   const feedStockKey = (row) => {
     const feedVariant = String(row?.feed_variant || "").trim();
@@ -108,30 +130,24 @@ export default function Dashboard() {
   useEffect(() => {
     const loadDashboardMetrics = async () => {
       const today = todayDateInputIST();
-      const fromDate = toApiDateTimeFromDateInput(today, false);
-      const toDate = toApiDateTimeFromDateInput(today, true);
+      const fromDate = toApiDateTimeFromDateInputIST(today, false);
+      const toDate = toApiDateTimeFromDateInputIST(today, true);
 
       try {
         const [
-          rmTodayRes,
           rmAllRes,
           feedTodayRes,
-          feedAllRes,
           dispatchTodayRes,
           productionTodayRes,
         ] = await Promise.all([
-          stockApi.rm({ date: today }),
           stockApi.rm(),
           stockApi.feed({ date: today }),
-          stockApi.feed(),
           dispatchApi.list({ from_date: fromDate, to_date: toDate }),
           productionApi.listBatches({ date: today }),
         ]);
 
-        const rmTodayRows = Array.isArray(rmTodayRes?.data) ? rmTodayRes.data : [];
         const rmAllRows = Array.isArray(rmAllRes?.data) ? rmAllRes.data : [];
         const feedTodayRows = Array.isArray(feedTodayRes?.data) ? feedTodayRes.data : [];
-        const feedAllRows = Array.isArray(feedAllRes?.data) ? feedAllRes.data : [];
         const dispatchTodayRows = Array.isArray(dispatchTodayRes?.data)
           ? dispatchTodayRes.data
           : [];
@@ -139,39 +155,33 @@ export default function Dashboard() {
           ? productionTodayRes.data
           : [];
 
-        let rawMaterialStockKg = sumLatestClosingByTypeForDay(
-          rmTodayRows,
-          (row) => row?.rm_name,
-          today
+        const rawMaterialStockKg = sumLatestClosingByType(
+          rmAllRows,
+          (row) => row?.rm_name
         );
-        if (rawMaterialStockKg <= 0) {
-          rawMaterialStockKg = sumLatestClosingByType(rmAllRows, (row) => row?.rm_name);
-        }
 
-        let finishedGoodsStockKg = sumLatestClosingByTypeForDay(
+        const finishedGoodsStockKg = sumLatestClosingByTypeForDay(
           feedTodayRows,
           feedStockKey,
           today
         );
-        if (finishedGoodsStockKg <= 0) {
-          finishedGoodsStockKg = sumLatestClosingByType(feedAllRows, feedStockKey);
-        }
 
-        const currentDayDispatchKg = dispatchTodayRows.reduce((sum, row) => {
-          const directTotal = Number(row?.total_weight);
-          if (Number.isFinite(directTotal)) return sum + directTotal;
-          const products = Array.isArray(row?.products) ? row.products : [];
-          const productTotal = products.reduce(
-            (acc, p) => acc + (Number(p?.total_weight) || 0),
-            0
-          );
-          return sum + productTotal;
-        }, 0);
+        const currentDayDispatchKg = dispatchTodayRows
+          .filter((row) => toDateInputIST(row?.date, "") === today)
+          .reduce((sum, row) => {
+            const directTotal = Number(row?.total_weight);
+            if (Number.isFinite(directTotal)) return sum + directTotal;
+            const products = Array.isArray(row?.products) ? row.products : [];
+            const productTotal = products.reduce(
+              (acc, p) => acc + (Number(p?.total_weight) || 0),
+              0
+            );
+            return sum + productTotal;
+          }, 0);
 
-        const currentDayProductionKg = productionTodayRows.reduce(
-          (sum, row) => sum + (Number(row?.output) || 0),
-          0
-        );
+        const currentDayProductionKg = productionTodayRows
+          .filter((row) => toDateInputIST(row?.date, "") === today)
+          .reduce((sum, row) => sum + (Number(row?.output) || 0), 0);
 
         setTodayMetrics({
           rawMaterialStockKg,
@@ -196,29 +206,148 @@ export default function Dashboard() {
 
   //Update the PLC data and history every 5 seconds
   useEffect(() => {
-    const refresh = () => {
-      plc
-        .latest()
-        .then(({ data }) => setPlcData(data))
-        .catch(() => setPlcData(null));
-      plc
-        .history(60)
-        .then(({ data }) => setPlcHistory(Array.isArray(data) ? data : []))
-        .catch(() => setPlcHistory([]));
-      plc
-        .machineStatus()
-        .then(({ data }) => setMachineStatus(data || null))
-        .catch(() => setMachineStatus(null));
+    const resolveBatchWindow = (batch) => {
+      const startedAt = batch?.started_at || batch?.date || batch?.created_at || null;
+      const endedAt = batch?.completed_at || batch?.last_modified_at || batch?.date || startedAt;
+      if (!parseApiDate(startedAt)) return null;
+      return { startedAt, endedAt };
+    };
+
+    const loadBatchHistory = async ({ startedAt, endedAt = null }) => {
+      const batchStartedAt = parseApiDate(startedAt);
+      if (!batchStartedAt) return [];
+
+      const parsedEndedAt = parseApiDate(endedAt) || new Date();
+      const batchEndedAt =
+        parsedEndedAt.getTime() >= batchStartedAt.getTime()
+          ? parsedEndedAt
+          : batchStartedAt;
+      const elapsedMinutes = Math.max(
+        1,
+        Math.ceil((batchEndedAt.getTime() - batchStartedAt.getTime()) / 60000) + 2
+      );
+      const historyWindowMinutes = Math.max(60, elapsedMinutes);
+      const historyRes = await plc.history(historyWindowMinutes);
+      const historyRows = Array.isArray(historyRes?.data) ? historyRes.data : [];
+      const startTs = batchStartedAt.getTime();
+      const endTs = batchEndedAt.getTime();
+
+      return historyRows.filter((row) => {
+        const ts = parseApiDate(row?.recorded_at)?.getTime();
+        return Number.isFinite(ts) && ts >= startTs && ts <= endTs;
+      });
+    };
+
+    const refresh = async () => {
+      try {
+        const [latestRes, machineStatusRes] = await Promise.all([
+          plc.latest(),
+          plc.machineStatus(),
+        ]);
+
+        const latestData = latestRes?.data || null;
+        const machineStatusData = machineStatusRes?.data || null;
+        setPlcData(latestData);
+        setMachineStatus(machineStatusData);
+
+        const activeBatch = machineStatusData?.active_batch || null;
+        const activeRunStatus = String(activeBatch?.run_status || "").toLowerCase();
+        const batchStartedAt = parseApiDate(activeBatch?.started_at);
+        const activeBatchId = activeBatch?.id ?? null;
+        const isBatchRunning =
+          Boolean(machineStatusData?.is_running) &&
+          activeRunStatus === "running" &&
+          Boolean(batchStartedAt);
+
+        if (isBatchRunning && batchStartedAt) {
+          const isNewBatch = displayedBatchIdRef.current !== activeBatchId;
+          if (isNewBatch) {
+            setPlcHistory([]);
+            hasGraphHistoryRef.current = false;
+          }
+
+          const filteredBatchRows = await loadBatchHistory({
+            startedAt: activeBatch?.started_at,
+          });
+          if (filteredBatchRows.length > 0) {
+            setPlcHistory(filteredBatchRows);
+            hasGraphHistoryRef.current = true;
+          }
+          displayedBatchIdRef.current = activeBatchId;
+          return;
+        }
+
+        // Freeze the graph once a running batch stops; do not auto-switch
+        // to older batches until a new batch starts or the page reloads.
+        if (displayedBatchIdRef.current != null && hasGraphHistoryRef.current) {
+          return;
+        }
+
+        const batchesRes = await productionApi.listBatches();
+        const batches = Array.isArray(batchesRes?.data) ? batchesRes.data : [];
+        const batchesWithWindow = batches
+          .map((batch) => {
+            const window = resolveBatchWindow(batch);
+            if (!window) return null;
+            const startedAtTs = parseApiDate(window.startedAt)?.getTime();
+            if (!Number.isFinite(startedAtTs)) return null;
+            const endedAtRawTs = parseApiDate(window.endedAt)?.getTime();
+            const endedAtTs = Number.isFinite(endedAtRawTs)
+              ? Math.max(startedAtTs, endedAtRawTs)
+              : startedAtTs;
+            return {
+              batch,
+              window,
+              endedAtTs,
+              status: String(batch?.run_status || "").toLowerCase(),
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => b.endedAtTs - a.endedAtTs);
+        const latestFinishedBatch =
+          batchesWithWindow.find(
+            (entry) => entry.status === "completed" || entry.status === "stopped"
+          ) || batchesWithWindow[0] || null;
+
+        if (!latestFinishedBatch) {
+          return;
+        }
+
+        if (
+          displayedBatchIdRef.current === (latestFinishedBatch.batch?.id ?? null) &&
+          hasGraphHistoryRef.current
+        ) {
+          return;
+        }
+
+        const completedBatchRows = await loadBatchHistory({
+          startedAt: latestFinishedBatch.window.startedAt,
+          endedAt: latestFinishedBatch.window.endedAt,
+        });
+        if (completedBatchRows.length === 0) {
+          return;
+        }
+
+        setPlcHistory(completedBatchRows);
+        displayedBatchIdRef.current = latestFinishedBatch.batch?.id ?? null;
+        hasGraphHistoryRef.current = true;
+      } catch {
+        // Keep latest visible graph data on transient API failures.
+      }
     };
     refresh();
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => {
+    hasGraphHistoryRef.current = Array.isArray(plcHistory) && plcHistory.length > 0;
+  }, [plcHistory]);
+
   //Graph Datta
 
-  const graphData = plcHistory.slice(-60).map((d) => ({
-    time: d.recorded_at ? formatTimeIST(d.recorded_at, "") : "",
+  const graphData = plcHistory.map((d) => ({
+    time: d.recorded_at ? formatTime24IST(d.recorded_at, "") : "",
     temp: d.ambient_temp ?? 0,
     humidity: d.humidity ?? 0,
     condTemp: d.conditioner_temp ?? 0,
@@ -228,9 +357,15 @@ export default function Dashboard() {
     pressureBefore: d.pressure_before ?? 0,
     pressureAfter: d.pressure_after ?? 0,
   }));
-  if (graphData.length === 0 && plcData) {
+  if (
+    graphData.length === 0 &&
+    plcData &&
+    machineStatus?.is_running &&
+    String(machineStatus?.active_batch?.run_status || "").toLowerCase() ===
+      "running"
+  ) {
     graphData.push({
-      time: formatTimeIST(dateTime, ""),
+      time: formatTime24IST(dateTime, ""),
       temp: plcData.ambient_temp ?? 0,
       humidity: plcData.humidity ?? 0,
       condTemp: plcData.conditioner_temp ?? 0,
@@ -289,6 +424,7 @@ export default function Dashboard() {
   const avgCondTemp = calculateAvg("condTemp");
   const avgBaggingTemp = calculateAvg("baggingTemp");
   const avgFeederSpeed = calculateAvg("feederSpeed");
+  const avgPelletMotorLoad = calculateAvg("pelletMotorLoad");
   const avgPressureBefore = calculateAvg("pressureBefore");
   const avgPressureAfter = calculateAvg("pressureAfter");
   const activeBatch = machineStatus?.active_batch || null;
@@ -312,55 +448,61 @@ export default function Dashboard() {
     }
     return unit ? `${value} ${unit}` : String(value);
   };
+  const hasGraphData = graphData.length > 0;
+  const todayForDownload = todayDateInputIST();
+  const todayRangeParams = {
+    from_date: toApiDateTimeFromDateInputIST(todayForDownload, false),
+    to_date: toApiDateTimeFromDateInputIST(todayForDownload, true),
+  };
 
   const cards = [
     {
       title: "Raw Material Stock",
-      value: formatKg(todayMetrics.rawMaterialStockKg),
-      unit: "KG",
+      value: formatMt(todayMetrics.rawMaterialStockKg),
+      unit: "MT",
       color: "#1f4d3a",
       buttonTop: "#2e6b52",
       buttonBottom: "#163c2d",
       texture: "url('/textures/chalk.png')",
       icon: corn,
-      download: () => stockApi.downloadRM(),
-      fileName: "raw_material_stock.pdf",
+      download: () => stockApi.downloadRMIndividual("pdf"),
+      fileName: "raw_material_available_stock.pdf",
     },
     {
       title: "Current Day Dispatch",
-      value: formatKg(todayMetrics.currentDayDispatchKg),
-      unit: "KG",
+      value: formatMt(todayMetrics.currentDayDispatchKg),
+      unit: "MT",
       color: "#D66816",
       buttonTop: "#e67d2a",
       buttonBottom: "#9f4a0d",
       texture: "url('/textures/chalk.png')",
       icon: truck,
-      download: () => stockApi.downloadDispatch(),
-      fileName: "dispatch_stock.pdf",
+      download: () => stockApi.downloadDispatch("pdf", todayRangeParams),
+      fileName: "dispatch_current_day.pdf",
     },
     {
       title: "Current Day Production",
-      value: formatKg(todayMetrics.currentDayProductionKg),
-      unit: "KG",
+      value: formatMt(todayMetrics.currentDayProductionKg),
+      unit: "MT",
       color: "#265B87",
       buttonTop: "#3e79a8",
       buttonBottom: "#1c4463",
       texture: "url('/textures/chalk.png')",
       icon: raw,
-      download: () => stockApi.downloadProduction(),
-      fileName: "production_stock.pdf",
+      download: () => stockApi.downloadProduction("pdf", todayRangeParams),
+      fileName: "production_current_day.pdf",
     },
     {
       title: "Finished Goods Stock",
-      value: formatKg(todayMetrics.finishedGoodsStockKg),
-      unit: "KG",
+      value: formatMt(todayMetrics.finishedGoodsStockKg),
+      unit: "MT",
       color: "#BC2B1C",
       buttonTop: "#d74636",
       buttonBottom: "#7e1a12",
       texture: "url('/textures/chalk.png')",
       icon: largegoods,
-      download: () => stockApi.downloadFeed("pdf"),
-      fileName: "finished_goods_stock.pdf",
+      download: () => stockApi.downloadFeed("pdf", todayRangeParams),
+      fileName: "finished_goods_current_day.pdf",
     },
   ];
 
@@ -788,386 +930,514 @@ export default function Dashboard() {
       </h2> */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 ">
         <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
-          <h3 className="text-sm font-semibold text-slate-700 mb-4">
-            Temp & Humidity
-          </h3>
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <h3 className="text-sm font-semibold text-slate-700">
+              Temp & Humidity
+            </h3>
+            <p className="text-[11px] text-right leading-4">
+              <span style={{ color: chartColors.temp }}>
+                Avg T: {hasGraphData ? avgTemp.toFixed(2) : "N/A"}
+              </span>{" "}
+              <span className="text-slate-400">|</span>{" "}
+              <span style={{ color: chartColors.humidity }}>
+                Avg H: {hasGraphData ? avgHumidity.toFixed(2) : "N/A"}
+              </span>
+            </p>
+          </div>
           {/* <div className="h-52"> */}
           <div className="h-60 sm:h-64 md:h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={graphData}>
-                <defs>
-                  <linearGradient id="tempGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop
-                      offset="0%"
-                      stopColor={chartColors.temp}
-                      stopOpacity={0.3}
-                    />
-                    <stop
-                      offset="100%"
-                      stopColor={chartColors.temp}
-                      stopOpacity={0}
-                    />
-                  </linearGradient>
-                  <linearGradient id="humGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop
-                      offset="0%"
-                      stopColor={chartColors.humidity}
-                      stopOpacity={0.3}
-                    />
-                    <stop
-                      offset="100%"
-                      stopColor={chartColors.humidity}
-                      stopOpacity={0}
-                    />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis
-                  dataKey="time"
-                  stroke="#64748b"
-                  fontSize={11}
-                  tick={{ fill: "#64748b" }}
-                />
-                <YAxis
-                  domain={["auto", "auto"]}
-                  stroke="#64748b"
-                  width={30}
-                  fontSize={11}
-                  tick={{ fill: "#64748b" }}
-                />
+            {hasGraphData ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={graphData}>
+                  <defs>
+                    <linearGradient id="tempGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop
+                        offset="0%"
+                        stopColor={chartColors.temp}
+                        stopOpacity={0.3}
+                      />
+                      <stop
+                        offset="100%"
+                        stopColor={chartColors.temp}
+                        stopOpacity={0}
+                      />
+                    </linearGradient>
+                    <linearGradient id="humGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop
+                        offset="0%"
+                        stopColor={chartColors.humidity}
+                        stopOpacity={0.3}
+                      />
+                      <stop
+                        offset="100%"
+                        stopColor={chartColors.humidity}
+                        stopOpacity={0}
+                      />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="time"
+                    stroke="#64748b"
+                    fontSize={11}
+                    tick={{ fill: "#64748b" }}
+                  />
+                  <YAxis
+                    domain={[0, 100]}
+                    ticks={fixedTicks(100)}
+                    interval={0}
+                    stroke="#64748b"
+                    width={30}
+                    fontSize={11}
+                    tick={{ fill: "#64748b" }}
+                  />
 
-                <Tooltip
-                  content={
-                    <CustomTooltip
-                      avgValues={[
-                        { label: "Temp", value: avgTemp },
-                        { label: "Humidity", value: avgHumidity },
-                      ]}
-                    />
-                  }
-                />
-                <Legend wrapperStyle={{ fontSize: "12px" }} />
-                <Area
-                  type="monotone"
-                  dataKey="temp"
-                  stroke={chartColors.temp}
-                  fill="url(#tempGrad)"
-                  name="Temp C"
-                  strokeWidth={2}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="humidity"
-                  stroke={chartColors.humidity}
-                  fill="url(#humGrad)"
-                  name="Humidity %"
-                  strokeWidth={2}
-                />
-                <ReferenceLine
-                  y={avgTemp}
-                  stroke="#ff0000"
-                  strokeDasharray="6 4"
-                  strokeWidth={2}
-                  label={{
-                    value: `Avg Temp: ${avgTemp.toFixed(1)}`,
-                    position: "right",
-                    fill: "#ff0000",
-                    fontSize: 10,
-                  }}
-                />
+                  <Tooltip
+                    content={
+                      <CustomTooltip
+                        avgValues={[
+                          { label: "Temp", value: avgTemp },
+                          { label: "Humidity", value: avgHumidity },
+                        ]}
+                      />
+                    }
+                  />
+                  <Legend wrapperStyle={{ fontSize: "12px" }} />
+                  <Area
+                    type="monotone"
+                    dataKey="temp"
+                    stroke={chartColors.temp}
+                    fill="url(#tempGrad)"
+                    name="Temp C"
+                    strokeWidth={2}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="humidity"
+                    stroke={chartColors.humidity}
+                    fill="url(#humGrad)"
+                    name="Humidity %"
+                    strokeWidth={2}
+                  />
+                  <ReferenceLine
+                    y={avgTemp}
+                    stroke="#ff0000"
+                    strokeDasharray="6 4"
+                    strokeWidth={2}
+                    label={{
+                      value: `Avg Temp: ${avgTemp.toFixed(1)}`,
+                      position: "right",
+                      fill: "#ff0000",
+                      fontSize: 10,
+                    }}
+                  />
 
-                <ReferenceLine
-                  y={avgHumidity}
-                  stroke="#0891b2"
-                  strokeDasharray="6 4"
-                  strokeWidth={2}
-                  label={{
-                    value: `Avg Hum: ${avgHumidity.toFixed(1)}`,
-                    position: "right",
-                    fill: "#0891b2",
-                    fontSize: 10,
-                  }}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+                  <ReferenceLine
+                    y={avgHumidity}
+                    stroke="#0891b2"
+                    strokeDasharray="6 4"
+                    strokeWidth={2}
+                    label={{
+                      value: `Avg Hum: ${avgHumidity.toFixed(1)}`,
+                      position: "right",
+                      fill: "#0891b2",
+                      fontSize: 10,
+                    }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-600 px-4 text-center">
+                
+              </div>
+            )}
           </div>
         </div>
         <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
-          <h3 className="text-sm font-semibold text-slate-700 mb-4">
-            Conditioner & Bagging Temp
-          </h3>
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <h3 className="text-sm font-semibold text-slate-700">
+              Conditioner & Bagging Temp
+            </h3>
+            <p className="text-[11px] text-right leading-4">
+              <span style={{ color: chartColors.condTemp }}>
+                Avg C: {hasGraphData ? avgCondTemp.toFixed(2) : "N/A"}
+              </span>{" "}
+              <span className="text-slate-400">|</span>{" "}
+              <span style={{ color: chartColors.baggingTemp }}>
+                Avg B: {hasGraphData ? avgBaggingTemp.toFixed(2) : "N/A"}
+              </span>
+            </p>
+          </div>
           {/* <div className="h-52"> */}
           <div className="h-60 sm:h-64 md:h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={graphData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis
-                  dataKey="time"
-                  stroke="#64748b"
-                  fontSize={11}
-                  tick={{ fill: "#64748b" }}
-                />
-                <YAxis
-                  domain={["auto", "auto"]}
-                  stroke="#64748b"
-                  width={30}
-                  fontSize={11}
-                  tick={{ fill: "#64748b" }}
-                />
+            {hasGraphData ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={graphData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="time"
+                    stroke="#64748b"
+                    fontSize={11}
+                    tick={{ fill: "#64748b" }}
+                  />
+                  <YAxis
+                    domain={[0, 250]}
+                    ticks={fixedTicks(250)}
+                    interval={0}
+                    stroke="#64748b"
+                    width={30}
+                    fontSize={11}
+                    tick={{ fill: "#64748b" }}
+                  />
 
-                <Tooltip
-                  content={
-                    <CustomTooltip
-                      avgValues={[
-                        { label: "Cond", value: avgCondTemp },
-                        { label: "Bagging", value: avgBaggingTemp },
-                      ]}
-                    />
-                  }
-                />
-                <Legend wrapperStyle={{ fontSize: "12px" }} />
-                <Area
-                  type="monotone"
-                  dataKey="condTemp"
-                  stroke={chartColors.condTemp}
-                  fill="url(#condGrad)"
-                  strokeWidth={2}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="baggingTemp"
-                  stroke={chartColors.baggingTemp}
-                  fill="url(#bagGrad)"
-                  strokeWidth={2}
-                />
-                <defs>
-                  <linearGradient id="condGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop
-                      offset="0%"
-                      stopColor={chartColors.condTemp}
-                      stopOpacity={0.3}
-                    />
-                    <stop
-                      offset="100%"
-                      stopColor={chartColors.condTemp}
-                      stopOpacity={0}
-                    />
-                  </linearGradient>
+                  <Tooltip
+                    content={
+                      <CustomTooltip
+                        avgValues={[
+                          { label: "Cond", value: avgCondTemp },
+                          { label: "Bagging", value: avgBaggingTemp },
+                        ]}
+                      />
+                    }
+                  />
+                  <Legend wrapperStyle={{ fontSize: "12px" }} />
+                  <Area
+                    type="monotone"
+                    dataKey="condTemp"
+                    stroke={chartColors.condTemp}
+                    fill="url(#condGrad)"
+                    strokeWidth={2}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="baggingTemp"
+                    stroke={chartColors.baggingTemp}
+                    fill="url(#bagGrad)"
+                    strokeWidth={2}
+                  />
+                  <defs>
+                    <linearGradient id="condGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop
+                        offset="0%"
+                        stopColor={chartColors.condTemp}
+                        stopOpacity={0.3}
+                      />
+                      <stop
+                        offset="100%"
+                        stopColor={chartColors.condTemp}
+                        stopOpacity={0}
+                      />
+                    </linearGradient>
 
-                  <linearGradient id="bagGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop
-                      offset="0%"
-                      stopColor={chartColors.baggingTemp}
-                      stopOpacity={0.3}
-                    />
-                    <stop
-                      offset="100%"
-                      stopColor={chartColors.baggingTemp}
-                      stopOpacity={0}
-                    />
-                  </linearGradient>
-                </defs>
-                <ReferenceLine
-                  y={avgCondTemp}
-                  stroke="#16a34a"
-                  strokeDasharray="6 4"
-                  strokeWidth={2}
-                  label={{
-                    value: `Avg Cond: ${avgCondTemp.toFixed(1)}`,
-                    position: "right",
-                    fill: "#16a34a",
-                    fontSize: 10,
-                  }}
-                />
+                    <linearGradient id="bagGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop
+                        offset="0%"
+                        stopColor={chartColors.baggingTemp}
+                        stopOpacity={0.3}
+                      />
+                      <stop
+                        offset="100%"
+                        stopColor={chartColors.baggingTemp}
+                        stopOpacity={0}
+                      />
+                    </linearGradient>
+                  </defs>
+                  <ReferenceLine
+                    y={avgCondTemp}
+                    stroke="#16a34a"
+                    strokeDasharray="6 4"
+                    strokeWidth={2}
+                    label={{
+                      value: `Avg Cond: ${avgCondTemp.toFixed(1)}`,
+                      position: "right",
+                      fill: "#16a34a",
+                      fontSize: 10,
+                    }}
+                  />
 
-                <ReferenceLine
-                  y={avgBaggingTemp}
-                  stroke="#f97316"
-                  strokeDasharray="6 4"
-                  strokeWidth={2}
-                  label={{
-                    value: `Avg Bag: ${avgBaggingTemp.toFixed(1)}`,
-                    position: "right",
-                    fill: "#f97316",
-                    fontSize: 10,
-                  }}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+                  <ReferenceLine
+                    y={avgBaggingTemp}
+                    stroke="#f97316"
+                    strokeDasharray="6 4"
+                    strokeWidth={2}
+                    label={{
+                      value: `Avg Bag: ${avgBaggingTemp.toFixed(1)}`,
+                      position: "right",
+                      fill: "#f97316",
+                      fontSize: 10,
+                    }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-600 px-4 text-center">
+                
+              </div>
+            )}
           </div>
         </div>
         <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
-          <h3 className="text-sm font-semibold text-slate-700 mb-4">
-            Pellet Feeder Speed
-          </h3>
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <h3 className="text-sm font-semibold text-slate-700">
+              Pellet Feeder Speed & Load
+            </h3>
+            <p className="text-[11px] text-right leading-4">
+              <span style={{ color: chartColors.feederSpeed }}>
+                Avg RPM: {hasGraphData ? avgFeederSpeed.toFixed(2) : "N/A"}
+              </span>{" "}
+              <span className="text-slate-400">|</span>{" "}
+              <span style={{ color: chartColors.feederLoad }}>
+                Avg Amp:{" "}
+                {hasGraphData ? avgPelletMotorLoad.toFixed(2) : "N/A"}
+              </span>
+            </p>
+          </div>
           {/* <div className="h-52"> */}
           <div className="h-60 sm:h-64 md:h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={graphData}>
-                <defs>
-                  <linearGradient id="speedGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop
-                      offset="0%"
-                      stopColor={chartColors.feederSpeed}
-                      stopOpacity={0.35}
-                    />
-                    <stop
-                      offset="100%"
-                      stopColor={chartColors.feederSpeed}
-                      stopOpacity={0}
-                    />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis
-                  dataKey="time"
-                  stroke="#64748b"
-                  fontSize={11}
-                  tick={{ fill: "#64748b" }}
-                />
-                <YAxis
-                  domain={["auto", "auto"]}
-                  width={30}
-                  stroke="#64748b"
-                  fontSize={11}
-                  tick={{ fill: "#64748b" }}
-                />
+            {hasGraphData ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={graphData}>
+                  <defs>
+                    <linearGradient id="speedGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop
+                        offset="0%"
+                        stopColor={chartColors.feederSpeed}
+                        stopOpacity={0.35}
+                      />
+                      <stop
+                        offset="100%"
+                        stopColor={chartColors.feederSpeed}
+                        stopOpacity={0}
+                      />
+                    </linearGradient>
+                    <linearGradient id="loadGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop
+                        offset="0%"
+                        stopColor={chartColors.feederLoad}
+                        stopOpacity={0.35}
+                      />
+                      <stop
+                        offset="100%"
+                        stopColor={chartColors.feederLoad}
+                        stopOpacity={0}
+                      />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="time"
+                    stroke="#64748b"
+                    fontSize={11}
+                    tick={{ fill: "#64748b" }}
+                  />
+                  <YAxis
+                    yAxisId="left"
+                    domain={[0, 1500]}
+                    ticks={fixedTicks(1500)}
+                    interval={0}
+                    width={36}
+                    stroke="#64748b"
+                    fontSize={11}
+                    tick={{ fill: "#64748b" }}
+                  />
+                  <YAxis
+                    yAxisId="right"
+                    orientation="right"
+                    domain={[0, 300]}
+                    ticks={fixedTicks(300)}
+                    interval={0}
+                    width={36}
+                    stroke="#64748b"
+                    fontSize={11}
+                    tick={{ fill: "#64748b" }}
+                  />
 
-                <Tooltip
-                  content={
-                    <CustomTooltip
-                      avgValues={[{ label: "Speed", value: avgFeederSpeed }]}
-                    />
-                  }
-                />
-                <Legend wrapperStyle={{ fontSize: "12px" }} />
-                <Area
-                  type="monotone"
-                  dataKey="feederSpeed"
-                  stroke={chartColors.feederSpeed}
-                  fill="url(#speedGrad)"
-                  name="Feeder Speed"
-                  strokeWidth={2}
-                />
-                <ReferenceLine
-                  y={avgFeederSpeed}
-                  stroke="#9333ea"
-                  strokeDasharray="6 4"
-                  strokeWidth={2}
-                  label={{
-                    value: `Avg Speed: ${avgFeederSpeed.toFixed(1)}`,
-                    position: "right",
-                    fill: "#9333ea",
-                    fontSize: 10,
-                  }}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+                  <Tooltip
+                    content={
+                      <CustomTooltip
+                        avgValues={[
+                          { label: "Speed (RPM)", value: avgFeederSpeed },
+                          { label: "Load (Amp)", value: avgPelletMotorLoad },
+                        ]}
+                      />
+                    }
+                  />
+                  <Legend wrapperStyle={{ fontSize: "12px" }} />
+                  <Area
+                    type="monotone"
+                    dataKey="feederSpeed"
+                    yAxisId="left"
+                    stroke={chartColors.feederSpeed}
+                    fill="url(#speedGrad)"
+                    name="Pellet Feeder Speed (RPM)"
+                    strokeWidth={2}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="pelletMotorLoad"
+                    yAxisId="right"
+                    stroke={chartColors.feederLoad}
+                    fill="url(#loadGrad)"
+                    name="Pellet Feeder Load (Amp)"
+                    strokeWidth={2}
+                  />
+                  <ReferenceLine
+                    yAxisId="left"
+                    y={avgFeederSpeed}
+                    stroke="#9333ea"
+                    strokeDasharray="6 4"
+                    strokeWidth={2}
+                    label={{
+                      value: `Avg RPM: ${avgFeederSpeed.toFixed(1)}`,
+                      position: "right",
+                      fill: "#9333ea",
+                      fontSize: 10,
+                    }}
+                  />
+                  <ReferenceLine
+                    yAxisId="right"
+                    y={avgPelletMotorLoad}
+                    stroke="#0f766e"
+                    strokeDasharray="6 4"
+                    strokeWidth={2}
+                    label={{
+                      value: `Avg Amp: ${avgPelletMotorLoad.toFixed(1)}`,
+                      position: "insideTopRight",
+                      fill: "#0f766e",
+                      fontSize: 10,
+                    }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-600 px-4 text-center">
+                
+              </div>
+            )}
           </div>
         </div>
         <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
-          <h3 className="text-sm font-semibold text-slate-700 mb-4">
-            Pressure Before & After
-          </h3>
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <h3 className="text-sm font-semibold text-slate-700">
+              Pressure Before & After
+            </h3>
+            <p className="text-[11px] text-right leading-4">
+              <span style={{ color: chartColors.pressureBefore }}>
+                Avg P1: {hasGraphData ? avgPressureBefore.toFixed(2) : "N/A"}
+              </span>{" "}
+              <span className="text-slate-400">|</span>{" "}
+              <span style={{ color: chartColors.pressureAfter }}>
+                Avg P2: {hasGraphData ? avgPressureAfter.toFixed(2) : "N/A"}
+              </span>
+            </p>
+          </div>
           {/* <div className="h-52"> */}
           <div className="h-60 sm:h-64 md:h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={graphData}>
-                <defs>
-                  <linearGradient id="beforeGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop
-                      offset="0%"
-                      stopColor={chartColors.pressureBefore}
-                      stopOpacity={0.2}
-                    />
-                    <stop
-                      offset="100%"
-                      stopColor={chartColors.pressureBefore}
-                      stopOpacity={0}
-                    />
-                  </linearGradient>
+            {hasGraphData ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={graphData}>
+                  <defs>
+                    <linearGradient id="beforeGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop
+                        offset="0%"
+                        stopColor={chartColors.pressureBefore}
+                        stopOpacity={0.2}
+                      />
+                      <stop
+                        offset="100%"
+                        stopColor={chartColors.pressureBefore}
+                        stopOpacity={0}
+                      />
+                    </linearGradient>
 
-                  <linearGradient id="afterGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop
-                      offset="0%"
-                      stopColor={chartColors.pressureAfter}
-                      stopOpacity={0.2}
-                    />
-                    <stop
-                      offset="100%"
-                      stopColor={chartColors.pressureAfter}
-                      stopOpacity={0}
-                    />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis
-                  dataKey="time"
-                  stroke="#64748b"
-                  fontSize={11}
-                  tick={{ fill: "#64748b" }}
-                />
-                <YAxis
-                  domain={["auto", "auto"]}
-                  width={30}
-                  stroke="#64748b"
-                  fontSize={11}
-                  tick={{ fill: "#64748b" }}
-                />
+                    <linearGradient id="afterGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop
+                        offset="0%"
+                        stopColor={chartColors.pressureAfter}
+                        stopOpacity={0.2}
+                      />
+                      <stop
+                        offset="100%"
+                        stopColor={chartColors.pressureAfter}
+                        stopOpacity={0}
+                      />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="time"
+                    stroke="#64748b"
+                    fontSize={11}
+                    tick={{ fill: "#64748b" }}
+                  />
+                  <YAxis
+                    domain={[0, 20]}
+                    ticks={fixedTicks(20)}
+                    interval={0}
+                    width={30}
+                    stroke="#64748b"
+                    fontSize={11}
+                    tick={{ fill: "#64748b" }}
+                  />
 
-                <Tooltip
-                  content={
-                    <CustomTooltip
-                      avgValues={[
-                        { label: "Before", value: avgPressureBefore },
-                        { label: "After", value: avgPressureAfter },
-                      ]}
-                    />
-                  }
-                />
-                <Legend wrapperStyle={{ fontSize: "12px" }} />
-                <Area
-                  type="monotone"
-                  dataKey="pressureBefore"
-                  stroke={chartColors.pressureBefore}
-                  fill="url(#beforeGrad)"
-                  strokeWidth={2}
-                />
+                  <Tooltip
+                    content={
+                      <CustomTooltip
+                        avgValues={[
+                          { label: "Before", value: avgPressureBefore },
+                          { label: "After", value: avgPressureAfter },
+                        ]}
+                      />
+                    }
+                  />
+                  <Legend wrapperStyle={{ fontSize: "12px" }} />
+                  <Area
+                    type="monotone"
+                    dataKey="pressureBefore"
+                    stroke={chartColors.pressureBefore}
+                    fill="url(#beforeGrad)"
+                    strokeWidth={2}
+                  />
 
-                <Area
-                  type="monotone"
-                  dataKey="pressureAfter"
-                  stroke={chartColors.pressureAfter}
-                  fill="url(#afterGrad)"
-                  strokeWidth={2}
-                />
-                <ReferenceLine
-                  y={avgPressureBefore}
-                  stroke="#0d9488"
-                  strokeDasharray="6 4"
-                  strokeWidth={2}
-                  label={{
-                    value: `Avg Before: ${avgPressureBefore.toFixed(2)}`,
-                    position: "right",
-                    fill: "#0d9488",
-                    fontSize: 10,
-                  }}
-                />
+                  <Area
+                    type="monotone"
+                    dataKey="pressureAfter"
+                    stroke={chartColors.pressureAfter}
+                    fill="url(#afterGrad)"
+                    strokeWidth={2}
+                  />
+                  <ReferenceLine
+                    y={avgPressureBefore}
+                    stroke="#0d9488"
+                    strokeDasharray="6 4"
+                    strokeWidth={2}
+                    label={{
+                      value: `Avg Before: ${avgPressureBefore.toFixed(2)}`,
+                      position: "right",
+                      fill: "#0d9488",
+                      fontSize: 10,
+                    }}
+                  />
 
-                <ReferenceLine
-                  y={avgPressureAfter}
-                  stroke="#ca8a04"
-                  strokeDasharray="6 4"
-                  strokeWidth={2}
-                  label={{
-                    value: `Avg After: ${avgPressureAfter.toFixed(2)}`,
-                    position: "right",
-                    fill: "#ca8a04",
-                    fontSize: 10,
-                  }}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+                  <ReferenceLine
+                    y={avgPressureAfter}
+                    stroke="#ca8a04"
+                    strokeDasharray="6 4"
+                    strokeWidth={2}
+                    label={{
+                      value: `Avg After: ${avgPressureAfter.toFixed(2)}`,
+                      position: "right",
+                      fill: "#ca8a04",
+                      fontSize: 10,
+                    }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-600 px-4 text-center">
+                
+              </div>
+            )}
           </div>
         </div>
       </div>

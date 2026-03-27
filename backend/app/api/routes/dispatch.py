@@ -1,7 +1,7 @@
 from ..fastapi_compat import Blueprint, Response, jsonify, request
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..common import (
     DEFAULT_CLIENT_ID,
@@ -68,7 +68,7 @@ def list_dispatch_entries():
             query = query.where(DispatchEntry.date <= to_date)
         if product_type:
             # Filter by any product in the entry
-            query = query.join(DispatchProduct).where(DispatchProduct.product_type == product_type)
+            query = query.join(DispatchProduct).where(DispatchProduct.product_type == product_type).distinct()
         if party_name:
             query = query.where(DispatchEntry.party_name.ilike(f"%{party_name}%"))
         query = query.order_by(DispatchEntry.date.desc())
@@ -147,6 +147,7 @@ def create_dispatch_entry():
                 )
                 if not product_type:
                     return error(f"Invalid product type: {prod['product_type']}")
+                prod["product_type"] = (product_type.name or "").strip()
 
             entry = DispatchEntry(
                 client_id=DEFAULT_CLIENT_ID,
@@ -178,7 +179,7 @@ def create_dispatch_entry():
                     client_id=DEFAULT_CLIENT_ID,
                     feed_type=prod["product_type"],
                     quantity=prod["total_weight"],
-                    date=date,
+                    date=date + timedelta(hours=5, minutes=30),
                     weight_per_bag=prod["weight_per_bag"],
                 )
 
@@ -238,6 +239,7 @@ def update_dispatch_entry(entry_id: int):
                 )
                 if not product_type:
                     return error(f"Invalid product type: {prod['product_type']}")
+                prod["product_type"] = (product_type.name or "").strip()
 
             # Update entry
             entry.date = date
@@ -307,6 +309,7 @@ def download_dispatch():
     except ValueError as exc:
         return error(str(exc))
 
+    product_type = request.args.get("product_type")
     file_format = request.args.get("format", "pdf").lower()
 
     with db_session() as db:
@@ -315,6 +318,8 @@ def download_dispatch():
             query = query.where(DispatchEntry.date >= from_date)
         if to_date:
             query = query.where(DispatchEntry.date <= to_date)
+        if product_type:
+            query = query.join(DispatchProduct).where(DispatchProduct.product_type == product_type).distinct()
         query = query.order_by(DispatchEntry.date.desc())
         rows = db.execute(query).scalars().all()
 
@@ -373,7 +378,11 @@ def download_single_dispatch_entry(entry_id: int):
 
     headers = ["Date", "Party Name", "Vehicle No", "Product Type", "Num Bags", "Weight Per Bag", "Total Weight", "Price"]
     data_rows = []
+    total_bags = 0.0
+    total_weight = 0.0
     for product in row.products:
+        total_bags += float(product.num_bags or 0)
+        total_weight += float(product.total_weight or 0)
         data_rows.append((
             row.date.strftime("%Y-%m-%d"),
             row.party_name,
@@ -384,6 +393,17 @@ def download_single_dispatch_entry(entry_id: int):
             product.total_weight,
             row.price or "",
         ))
+    total_amount = (total_weight * float(row.price)) if row.price is not None else ""
+    data_rows.append((
+        "",
+        "",
+        "",
+        "TOTAL",
+        total_bags,
+        "",
+        total_weight,
+        total_amount,
+    ))
 
     filename = f"dispatch_{entry_id}_report"
 

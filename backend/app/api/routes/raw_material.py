@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from ..fastapi_compat import Blueprint, Response, jsonify, request
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from ..common import (
     DEFAULT_CLIENT_ID,
@@ -18,7 +18,7 @@ from ...models.config import RecipeMaterial
 from ...models.production import ProductionBatchMaterial
 from ...models.raw_material import RawMaterialEntry, RawMaterialLabReport, RawMaterialType
 from ...models.stock import RMStockLedger
-from ...services.stock import add_rm_received, rebuild_rm_stock_ledger
+from ...services.stock import rebuild_rm_stock_ledger
 from ...utils.export import (
     export_multi_table_to_excel,
     export_multi_table_to_pdf,
@@ -244,6 +244,9 @@ def create_raw_material_entry():
         date = parse_datetime(required(payload, "date"), "date")
         if date is None:
             raise ValueError("date is required")
+        total_weight = parse_float(payload, "total_weight", required_field=True)
+        if total_weight is None or total_weight <= 0:
+            raise ValueError("total_weight must be greater than 0")
         entry = RawMaterialEntry(
             client_id=DEFAULT_CLIENT_ID,
             date=date,
@@ -251,24 +254,21 @@ def create_raw_material_entry():
             supplier=required(payload, "supplier"),
             challan_no=required(payload, "challan_no"),
             vehicle_no=required(payload, "vehicle_no"),
-            total_weight=parse_float(payload, "total_weight", required_field=True),
+            total_weight=total_weight,
             remarks=payload.get("remarks"),
         )
     except ValueError as exc:
         return error(str(exc))
 
-    with db_session() as db:
-        db.add(entry)
-        db.flush()
-        db.refresh(entry)
-        add_rm_received(
-            db=db,
-            client_id=DEFAULT_CLIENT_ID,
-            rm_name=entry.rm_type,
-            quantity=entry.total_weight,
-            date=entry.date,
-        )
-        return jsonify(serialize_raw_entry(entry, has_lab=False))
+    try:
+        with db_session() as db:
+            db.add(entry)
+            db.flush()
+            db.refresh(entry)
+            rebuild_rm_stock_ledger(db=db, client_id=DEFAULT_CLIENT_ID)
+            return jsonify(serialize_raw_entry(entry, has_lab=False))
+    except ValueError as exc:
+        return error(str(exc))
 
 
 @raw_material_bp.put("/<int:entry_id>")
@@ -288,33 +288,33 @@ def update_raw_material_entry(entry_id: int):
     except ValueError as exc:
         return error(str(exc))
 
-    with db_session() as db:
-        entry = db.get(RawMaterialEntry, entry_id)
-        if not entry or entry.client_id != DEFAULT_CLIENT_ID:
-            return error("Entry not found", 404)
+    try:
+        with db_session() as db:
+            entry = db.get(RawMaterialEntry, entry_id)
+            if not entry or entry.client_id != DEFAULT_CLIENT_ID:
+                return error("Entry not found", 404)
 
-        entry.date = date
-        entry.rm_type = rm_type
-        entry.supplier = supplier
-        entry.challan_no = challan_no
-        entry.vehicle_no = vehicle_no
-        entry.total_weight = total_weight
-        entry.remarks = payload.get("remarks")
-        entry.last_modified_at = datetime.utcnow()
-        db.flush()
+            entry.date = date
+            entry.rm_type = rm_type
+            entry.supplier = supplier
+            entry.challan_no = challan_no
+            entry.vehicle_no = vehicle_no
+            entry.total_weight = total_weight
+            entry.remarks = payload.get("remarks")
+            entry.last_modified_at = datetime.utcnow()
+            db.flush()
 
-        try:
             rebuild_rm_stock_ledger(db=db, client_id=DEFAULT_CLIENT_ID)
-        except ValueError as exc:
-            return error(str(exc))
 
-        has_lab = (
-            db.execute(select(RawMaterialLabReport).where(RawMaterialLabReport.entry_id == entry.id))
-            .scalars()
-            .one_or_none()
-            is not None
-        )
-        return jsonify(serialize_raw_entry(entry, has_lab=has_lab))
+            has_lab = (
+                db.execute(select(RawMaterialLabReport).where(RawMaterialLabReport.entry_id == entry.id))
+                .scalars()
+                .one_or_none()
+                is not None
+            )
+            return jsonify(serialize_raw_entry(entry, has_lab=has_lab))
+    except ValueError as exc:
+        return error(str(exc))
 
 
 @raw_material_bp.post("/lab-report")
@@ -385,6 +385,8 @@ def download_raw_material():
         to_date = parse_datetime(request.args.get("to_date"), "to_date")
     except ValueError as exc:
         return error(str(exc))
+    rm_type = str(request.args.get("rm_type") or "").strip()
+    query_text = str(request.args.get("q") or "").strip()
 
     file_format = request.args.get("format", "pdf").lower()
 
@@ -394,6 +396,18 @@ def download_raw_material():
             query = query.where(RawMaterialEntry.date >= from_date)
         if to_date:
             query = query.where(RawMaterialEntry.date <= to_date)
+        if rm_type:
+            query = query.where(func.lower(RawMaterialEntry.rm_type) == rm_type.lower())
+        if query_text:
+            pattern = f"%{query_text}%"
+            query = query.where(
+                or_(
+                    RawMaterialEntry.rm_type.ilike(pattern),
+                    RawMaterialEntry.supplier.ilike(pattern),
+                    RawMaterialEntry.vehicle_no.ilike(pattern),
+                    RawMaterialEntry.challan_no.ilike(pattern),
+                )
+            )
         query = query.order_by(RawMaterialEntry.date.desc())
         entries = db.execute(query).scalars().all()
 
@@ -470,8 +484,9 @@ def download_raw_material_entry(entry_id: int):
         ("Last Modified At", dt(entry.last_modified_at) or ""),
     ]
 
+    is_maize_entry = str(entry.rm_type or "").strip().lower() == "maize"
     if report:
-        lab_rows = [
+        basic_lab_rows = [
             ("Protein", report.protein if report.protein is not None else ""),
             ("Fat", report.fat if report.fat is not None else ""),
             ("Fiber", report.fiber if report.fiber is not None else ""),
@@ -480,6 +495,8 @@ def download_raw_material_entry(entry_id: int):
             ("Phosphorus", report.phosphorus if report.phosphorus is not None else ""),
             ("Salt", report.salt if report.salt is not None else ""),
             ("Moisture", report.moisture if report.moisture is not None else ""),
+        ]
+        maize_only_lab_rows = [
             ("Fungus", report.fungus or ""),
             ("Broke", report.broke or ""),
             ("Water Damage", report.water_damage or ""),
@@ -490,6 +507,7 @@ def download_raw_material_entry(entry_id: int):
             ("Colour", report.colour or ""),
             ("Smell", report.smell or ""),
         ]
+        lab_rows = basic_lab_rows + (maize_only_lab_rows if is_maize_entry else [])
     else:
         lab_rows = [("Lab Report", "Not available")]
 
