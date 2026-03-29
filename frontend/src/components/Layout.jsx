@@ -17,9 +17,9 @@ import { productionApi } from '../api/client'
 
 const nav = [
   { to: '/layout', label: 'Dashboard', icon: LayoutDashboard },
-  { to: 'raw-material', label: 'RM Reports', icon: ClipboardList },
-  { to: 'dispatch', label: 'Dispatch Reports', icon: Truck },
-  { to: 'production', label: 'Production Reports', icon: Factory },
+    { to: 'production', label: 'Production ', icon: Factory },
+  { to: 'raw-material', label: 'Raw Material', icon: ClipboardList },
+  { to: 'dispatch', label: 'Dispatch ', icon: Truck },
   { to: 'stock', label: 'Stock Reports', icon: Boxes },
   { to: 'settings', label: 'Settings', icon: Settings },
 ]
@@ -30,6 +30,24 @@ export default function Layout() {
   const knownBatchIdsRef = useRef(new Set())
   const completedReminderIdsRef = useRef(new Set())
   const initializedRef = useRef(false)
+const [isScrolled, setIsScrolled] = useState(false)
+const mainRef = useRef(null)
+
+useEffect(() => {
+  const el = mainRef.current
+  if (!el) return
+
+  const handleScroll = () => {
+    if (el.scrollTop > 50) {
+      setIsScrolled(true)
+    } else {
+      setIsScrolled(false)
+    }
+  }
+
+  el.addEventListener("scroll", handleScroll)
+  return () => el.removeEventListener("scroll", handleScroll)
+}, [])
 
   const dismissBatchNotification = (id) => {
     setBatchNotifications((prev) => prev.filter((item) => item.id !== id))
@@ -106,16 +124,15 @@ export default function Layout() {
 <div className="h-screen flex flex-col bg-slate-50 overflow-hidden overflow-x-hidden">
       
       {/* 🔷 FULL WIDTH BANNER */}
-   <div className="relative w-full h-[200px] md:h-[170px] sm:h-[120px] bg-slate-100 overflow-hidden">
+   {/* <div className="relative w-full h-[200px] md:h-[170px] sm:h-[120px] bg-slate-100 overflow-hidden">
 
-  {/* Banner Image */}
   <img
     src="/poultry-banner.png"
     alt="banner"
     className="w-full h-full object-fill"
   />
 
-  {/* Overlay Content */}
+ 
   <div className="absolute inset-0 flex flex-col items-center justify-start">
     <h1 className="text-xl mt-20 sm:text-xl md:text-3xl font-semibold text-gray-800 sm:mt-8">
       
@@ -123,7 +140,7 @@ export default function Layout() {
     </h1>
   </div>
 
-  {/* Profile */}
+
   <div className="absolute right-6 top-4 flex items-center gap-3">
     <div className="text-right text-xs sm:text-sm">
       <p className="text-sm font-medium">FEED MILL INTELLIGENCE</p>
@@ -136,18 +153,102 @@ export default function Layout() {
     />
   </div>
 
+</div> */}
+<div
+  className={`sticky top-0 z-50 w-full transition-all duration-500
+  ${isScrolled ? "h-[60px] bg-[#2F6A6B] shadow-md" : "h-[200px] md:h-[170px] sm:h-[120px] bg-slate-100"}
+  overflow-hidden`}
+  style={{
+    backgroundImage: "url('/textures/chalk.png')",
+    backgroundBlendMode: "overlay",
+  }}
+>
+
+  {/* Banner Image */}
+  <img
+    src="/poultry-banner.png"
+    alt="banner"
+    className={`w-full h-full object-fill transition-opacity duration-500
+    ${isScrolled ? "opacity-0" : "opacity-100"}`}
+  />
+
+  {/* Title */}
+<div className="absolute inset-0 flex items-center justify-center px-3 sm:px-6">
+
+  {/* LEFT: ICON + TITLE */}
+  <div className="flex items-center gap-2 min-w-0">
+
+    <ClipboardList
+      className={`transition-all duration-500 flex-shrink-0
+      ${isScrolled 
+        ? "w-4 h-4 sm:w-5 sm:h-5 text-gray-100 sm:block hidden" 
+        : "hidden  w-5 h-5 text-gray-800"
+      }`}
+    />
+
+ <h1
+  className={`font-semibold transition-all duration-500 tracking-wider text-center
+  ${isScrolled 
+    ? "text-sm sm:text-lg text-gray-100 "
+    : "text-lg sm:text-xl md:text-3xl text-gray-800"
+  }`}
+>
+  <span className={`${isScrolled ? "block sm:inline" : "inline"}`}>
+    PRODUCTION TRACKING 
+  </span>{" "}
+  <span className={`${isScrolled ? "block sm:inline" : "inline"}`}>
+     SYSTEM
+  </span>
+</h1>
+
+  </div>
+
 </div>
+
+{/* PROFILE */}
+<div
+  className={`absolute right-3 sm:right-6 flex items-center gap-2 sm:gap-3 transition-all duration-500
+  ${isScrolled ? "top-2" : "top-3 sm:top-4"}`}
+>
+
+  {/* TEXT (HIDE IN MOBILE) */}
+  <div className="text-right text-xs sm:text-sm hidden lg:block">
+    <p
+      className={`text-sm md:text-md font-medium transition-colors duration-500
+      ${isScrolled ? "text-gray-100" : "text-gray-800"}`}
+    >
+      POULTRY NET INTELLIGENCE
+    </p>
+
+    {!isScrolled && (
+      <p className="text-xs text-gray-500">+91 98765 43210</p>
+    )}
+  </div>
+
+  {/* PROFILE IMAGE */}
+  <img
+    src="/profile.jpeg"
+    className={`rounded-full border border-slate-700 transition-all duration-500
+    ${isScrolled ? "w-8 h-8 sm:w-9 sm:h-9" : "w-9 h-9 sm:w-12 sm:h-12"}`}
+    alt="profile"
+  />
+
+</div>
+
+</div>
+
+
 
       {/* 🔷 SIDEBAR + CONTENT */}
       <div className="flex flex-1 overflow-hidden w-full">
 
         {/* MOBILE MENU BUTTON */}
-        <button
+        {/* <button
           onClick={() => setOpen(true)}
           className="lg:hidden fixed top-3 left-3 z-50 bg-white p-2 rounded-lg shadow"
         >
           <Menu size={22} />
-        </button>
+        </button> */}
 
         {/* SIDEBAR */}
         <aside
@@ -208,7 +309,12 @@ export default function Layout() {
         <div className="flex-1 flex flex-col min-w-0">
 
           {/* ONLY SCROLLABLE AREA */}
-          <main className="flex-1 pb-24 p-4 md:p-6 overflow-y-auto min-w-0 ">
+          {/* <main className="flex-1 pb-24 p-4 md:p-6 overflow-y-auto min-w-0 "> */}
+            <main
+  ref={mainRef}
+  className={`flex-1 pb-24 p-4 md:p-6 overflow-y-auto min-w-0 transition-all duration-500
+  ${isScrolled ? "mt-2" : "mt-0"}`}
+>
             <Outlet />
           </main>
 
@@ -258,18 +364,17 @@ export default function Layout() {
       </>
     )}
   </NavLink>
-
-  <NavLink to="stock" className="flex flex-col items-center">
+   <NavLink to="raw-material" className="flex flex-col items-center">
     {({ isActive }) => (
       <>
         <div className={`flex items-center justify-center rounded-full transition
           ${isActive ? "bg-[#D7E6E6] w-11 h-11" : "w-11 h-11"}`}>
-          <Boxes size={22} color={isActive ? "black" : "#475569"} />
+          <ClipboardList size={22} color={isActive ? "black" : "#475569"} />
         </div>
 
-        <span className="text-[10px] mt-1  font-extrabold"
+        <span className="text-[10px] mt-1 font-extrabold" 
           style={{ color: isActive ? "#245658" : "#475569" }}>
-          Stock
+          RM
         </span>
       </>
     )}
@@ -291,21 +396,26 @@ export default function Layout() {
     )}
   </NavLink>
 
-  <NavLink to="raw-material" className="flex flex-col items-center">
+
+  <NavLink to="stock" className="flex flex-col items-center">
     {({ isActive }) => (
       <>
         <div className={`flex items-center justify-center rounded-full transition
           ${isActive ? "bg-[#D7E6E6] w-11 h-11" : "w-11 h-11"}`}>
-          <ClipboardList size={22} color={isActive ? "black" : "#475569"} />
+          <Boxes size={22} color={isActive ? "black" : "#475569"} />
         </div>
 
-        <span className="text-[10px] mt-1 font-extrabold" 
+        <span className="text-[10px] mt-1  font-extrabold"
           style={{ color: isActive ? "#245658" : "#475569" }}>
-          RM
+          Stocks
         </span>
       </>
     )}
   </NavLink>
+
+
+
+ 
 
 
 	  <NavLink to="settings" className="flex flex-col items-center">

@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Legend,
   Area,
-  AreaChart,
+  AreaChart,  
   ReferenceLine,
 } from "recharts";
 import { Truck, Factory, Boxes } from "lucide-react";
@@ -418,7 +418,7 @@ export default function Dashboard() {
       graphData.length
     );
   };
-
+const [showRecipePopup, setShowRecipePopup] = useState(false)
   const avgTemp = calculateAvg("temp");
   const avgHumidity = calculateAvg("humidity");
   const avgCondTemp = calculateAvg("condTemp");
@@ -469,7 +469,7 @@ export default function Dashboard() {
       fileName: "raw_material_available_stock.pdf",
     },
     {
-      title: "Current Day Dispatch",
+      title: "Today's Dispatch",
       value: formatMt(todayMetrics.currentDayDispatchKg),
       unit: "MT",
       color: "#D66816",
@@ -481,7 +481,7 @@ export default function Dashboard() {
       fileName: "dispatch_current_day.pdf",
     },
     {
-      title: "Current Day Production",
+      title: "Today's Production",
       value: formatMt(todayMetrics.currentDayProductionKg),
       unit: "MT",
       color: "#265B87",
@@ -600,8 +600,60 @@ export default function Dashboard() {
 
        
           </div>
+{showRecipePopup && (
+  <div
+    className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+    onClick={() => setShowRecipePopup(false)}
+  >
+    <div
+      className="bg-white w-[420px] rounded-xl shadow-lg  m-5 sm:m-1"
+      onClick={(e) => e.stopPropagation()}
+    >
 
-          <div className="mt-4">
+      {/* HEADER */}
+      <div className="flex justify-between items-center px-4 py-3 border-b">
+        <h2 className="text-lg font-semibold">Active Recipe</h2>
+
+        <button
+          onClick={() => setShowRecipePopup(false)}
+          className="text-gray-500 hover:text-black text-lg"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* BODY */}
+      <div className="p-4 max-h-[300px] overflow-y-auto ">
+
+        {activeMaterials.length === 0 ? (
+          <p className="text-sm text-gray-500">
+            No recipe available
+          </p>
+        ) : (
+          <div className="space-y-2 border border-dashed border-gray-300 rounded-lg">
+            {activeMaterials.map((item, idx) => (
+              <div
+                key={idx}
+                className="flex justify-between border rounded px-3 py-2 text-sm"
+              >
+                <span className="font-medium text-slate-700">
+                  {item.rm_name}
+                </span>
+
+                <span className="text-slate-600">
+                  {item.quantity} kg
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+      </div>
+
+    </div>
+  </div>
+)}
+          {/* <div className="mt-4">
             <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
               Active Recipe
             </p>
@@ -624,7 +676,17 @@ export default function Dashboard() {
                 ))}
               </div>
             )}
-          </div>
+          </div> */}
+        <div>
+  <button
+    onClick={() => setShowRecipePopup(true)}
+    className="mt-4 px-4 py-2  bg-[#245658] font-bold text-white rounded text-sm flex items-center gap-2"
+  >
+  
+    <span>View Recipe</span>
+  </button>
+</div>
+       
         </div>
 
         
@@ -727,15 +789,16 @@ export default function Dashboard() {
       </div>
       {/* Main Four Box calculate last 20 days  */}
 
-      <div className="grid gap-6 xl:grid-cols-4 md:grid-cols-2">
+      {/* <div className="grid gap-6 xl:grid-cols-4 md:grid-cols-2"> */}
+        <div className="grid gap-6 md:grid-cols-2 kpi-container">
         {cards.map((card, i) => {
           // const Icon = card.icon;
           return (
             <div
               key={i}
-              className="relative rounded-lg shadow-[0_6px_12px_rgba(0,0,0,0.35)]
+              className=" kpi-card relative rounded-lg shadow-[0_6px_12px_rgba(0,0,0,0.35)]
                        border border-slate-300 overflow-hidden
-                       bg-white"
+                       bg-[#E4E8EB]"
             >
               {/* TOP TEXTURED HEADER */}
 
@@ -932,7 +995,7 @@ export default function Dashboard() {
         <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
           <div className="mb-4 flex items-start justify-between gap-3">
             <h3 className="text-sm font-semibold text-slate-700">
-              Temp & Humidity
+              Temperature & Humidity
             </h3>
             <p className="text-[11px] text-right leading-4">
               <span style={{ color: chartColors.temp }}>
@@ -978,6 +1041,15 @@ export default function Dashboard() {
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                   <XAxis
                     dataKey="time"
+                    label={{
+                                value: "Time ",        
+                                position: "insideBottom",
+                                offset: -5,            
+                                style: {
+                                  fontSize: 11,
+                                  fill: "#475569"
+                                }
+                              }}
                     stroke="#64748b"
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
@@ -987,28 +1059,35 @@ export default function Dashboard() {
                     ticks={fixedTicks(100)}
                     interval={0}
                     stroke="#64748b"
-                    width={30}
+                    width={40}
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
+                     label={{
+                    value: "Temperature (°C) / Humidity (%)",
+                    angle: -90,
+                    dx:-5,
+                    position: "insideLeft",
+                    style: { textAnchor: "middle" ,fontSize: 10  }
+                  }}
                   />
 
                   <Tooltip
                     content={
                       <CustomTooltip
                         avgValues={[
-                          { label: "Temp", value: avgTemp },
+                          { label: "Temperature", value: avgTemp },
                           { label: "Humidity", value: avgHumidity },
                         ]}
                       />
                     }
                   />
-                  <Legend wrapperStyle={{ fontSize: "12px" }} />
+                  <Legend wrapperStyle={{ fontSize: "12px", paddingTop: 10 }} />
                   <Area
                     type="monotone"
                     dataKey="temp"
                     stroke={chartColors.temp}
                     fill="url(#tempGrad)"
-                    name="Temp C"
+                     name="Temperature °C"
                     strokeWidth={2}
                   />
                   <Area
@@ -1056,7 +1135,7 @@ export default function Dashboard() {
         <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card">
           <div className="mb-4 flex items-start justify-between gap-3">
             <h3 className="text-sm font-semibold text-slate-700">
-              Conditioner & Bagging Temp
+              Conditioner & Bagging Temperature
             </h3>
             <p className="text-[11px] text-right leading-4">
               <span style={{ color: chartColors.condTemp }}>
@@ -1079,37 +1158,55 @@ export default function Dashboard() {
                     stroke="#64748b"
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
+                       label={{
+                                value: "Time ",        
+                                position: "insideBottom",
+                                offset: -5,            
+                                style: {
+                                  fontSize: 11,
+                                  fill: "#475569"
+                                }
+                              }}
                   />
                   <YAxis
                     domain={[0, 250]}
                     ticks={fixedTicks(250)}
                     interval={0}
                     stroke="#64748b"
-                    width={30}
+                    width={40}
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
+                      label={{
+                    value: "Conditioner / Bagging (°C)",
+                    angle: -90,
+                    dx:-5,
+                    position: "insideLeft",
+                    style: { textAnchor: "middle" ,fontSize: 10  }
+                  }}
                   />
 
                   <Tooltip
                     content={
                       <CustomTooltip
                         avgValues={[
-                          { label: "Cond", value: avgCondTemp },
-                          { label: "Bagging", value: avgBaggingTemp },
+                          { label: "Conditioner Temperature", value: avgCondTemp },
+                          { label: "Bagging Temperature", value: avgBaggingTemp },
                         ]}
                       />
                     }
                   />
-                  <Legend wrapperStyle={{ fontSize: "12px" }} />
+                  <Legend wrapperStyle={{ fontSize: "12px" , paddingTop: 10  }} />
                   <Area
                     type="monotone"
                     dataKey="condTemp"
+                      name="Conditioner Temperature °C"
                     stroke={chartColors.condTemp}
                     fill="url(#condGrad)"
                     strokeWidth={2}
                   />
                   <Area
                     type="monotone"
+                     name="Bagging Temperature °C"
                     dataKey="baggingTemp"
                     stroke={chartColors.baggingTemp}
                     fill="url(#bagGrad)"
@@ -1229,16 +1326,32 @@ export default function Dashboard() {
                     stroke="#64748b"
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
+                     label={{
+                                value: "Time ",        
+                                position: "insideBottom",
+                                offset: -5,            
+                                style: {
+                                  fontSize: 11,
+                                  fill: "#475569"
+                                }
+                              }}
                   />
                   <YAxis
                     yAxisId="left"
                     domain={[0, 1500]}
                     ticks={fixedTicks(1500)}
                     interval={0}
-                    width={36}
+                    width={45}
                     stroke="#64748b"
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
+                     label={{
+                    value: "Pellet Feeder Speed (rpm)",
+                    angle: -90,
+                    dx:-5,
+                    position: "insideLeft",
+                    style: { textAnchor: "middle" ,fontSize: 10  }
+                  }}
                   />
                   <YAxis
                     yAxisId="right"
@@ -1250,26 +1363,36 @@ export default function Dashboard() {
                     stroke="#64748b"
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
+                      label={{
+    value: "Pellet Feeder Load (amp)",
+    angle: 90,              
+    position: "insideRight",
+    dx: 5,                 
+    style: {
+      textAnchor: "middle",
+      fontSize: 10
+    }
+  }}
                   />
 
                   <Tooltip
                     content={
                       <CustomTooltip
                         avgValues={[
-                          { label: "Speed (RPM)", value: avgFeederSpeed },
-                          { label: "Load (Amp)", value: avgPelletMotorLoad },
+                          { label: "Speed (rpm)", value: avgFeederSpeed },
+                          { label: "Load (amp)", value: avgPelletMotorLoad },
                         ]}
                       />
                     }
                   />
-                  <Legend wrapperStyle={{ fontSize: "12px" }} />
+                  <Legend wrapperStyle={{ fontSize: "12px" ,paddingTop: 10}} />
                   <Area
                     type="monotone"
                     dataKey="feederSpeed"
                     yAxisId="left"
                     stroke={chartColors.feederSpeed}
                     fill="url(#speedGrad)"
-                    name="Pellet Feeder Speed (RPM)"
+                    name="Pellet Feeder Speed (rpm)"
                     strokeWidth={2}
                   />
                   <Area
@@ -1278,7 +1401,7 @@ export default function Dashboard() {
                     yAxisId="right"
                     stroke={chartColors.feederLoad}
                     fill="url(#loadGrad)"
-                    name="Pellet Feeder Load (Amp)"
+                    name="Pellet Feeder Load (amp)"
                     strokeWidth={2}
                   />
                   <ReferenceLine
@@ -1287,12 +1410,7 @@ export default function Dashboard() {
                     stroke="#9333ea"
                     strokeDasharray="6 4"
                     strokeWidth={2}
-                    label={{
-                      value: `Avg RPM: ${avgFeederSpeed.toFixed(1)}`,
-                      position: "right",
-                      fill: "#9333ea",
-                      fontSize: 10,
-                    }}
+        
                   />
                   <ReferenceLine
                     yAxisId="right"
@@ -1300,12 +1418,7 @@ export default function Dashboard() {
                     stroke="#0f766e"
                     strokeDasharray="6 4"
                     strokeWidth={2}
-                    label={{
-                      value: `Avg Amp: ${avgPelletMotorLoad.toFixed(1)}`,
-                      position: "insideTopRight",
-                      fill: "#0f766e",
-                      fontSize: 10,
-                    }}
+                
                   />
                 </AreaChart>
               </ResponsiveContainer>
@@ -1369,15 +1482,31 @@ export default function Dashboard() {
                     stroke="#64748b"
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
+                      label={{
+                                value: "Time ",        
+                                position: "insideBottom",
+                                offset: -5,            
+                                style: {
+                                  fontSize: 11,
+                                  fill: "#475569"
+                                }
+                              }}
                   />
                   <YAxis
                     domain={[0, 20]}
                     ticks={fixedTicks(20)}
                     interval={0}
-                    width={30}
+                    width={40}
                     stroke="#64748b"
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
+                     label={{
+                    value: "Pressure Before & After",
+                    angle: -90,
+                    dx:-6,
+                    position: "insideLeft",
+                    style: { textAnchor: "middle" ,fontSize: 10  }
+                  }}
                   />
 
                   <Tooltip
@@ -1390,9 +1519,10 @@ export default function Dashboard() {
                       />
                     }
                   />
-                  <Legend wrapperStyle={{ fontSize: "12px" }} />
+                  <Legend wrapperStyle={{ fontSize: "12px" , paddingTop: 10}} />
                   <Area
                     type="monotone"
+                     name="Pressure Before"
                     dataKey="pressureBefore"
                     stroke={chartColors.pressureBefore}
                     fill="url(#beforeGrad)"
@@ -1402,6 +1532,7 @@ export default function Dashboard() {
                   <Area
                     type="monotone"
                     dataKey="pressureAfter"
+                     name="Pressure After"
                     stroke={chartColors.pressureAfter}
                     fill="url(#afterGrad)"
                     strokeWidth={2}

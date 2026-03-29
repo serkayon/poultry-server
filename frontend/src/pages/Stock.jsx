@@ -304,7 +304,7 @@ export default function Stock() {
           </div>
           <div className="flex gap-2">
             <button onClick={() => downloadOverall('pdf')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download RM + Feed PDF</button>
-            <button onClick={() => downloadOverall('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download RM + Feed Export</button>
+            <button onClick={() => downloadOverall('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download RM + Feed Excel</button>
           </div>
         </div>
       </div>
@@ -318,7 +318,7 @@ export default function Stock() {
             </div>
             <div className="flex gap-2 shrink-0">
               <button onClick={() => downloadRm('pdf')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download PDF</button>
-              <button onClick={() => downloadRm('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download Export</button>
+              <button onClick={() => downloadRm('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download Excel</button>
             </div>
           </div>
           <div className="overflow-x-auto">
@@ -357,7 +357,7 @@ export default function Stock() {
             </div>
             <div className="flex gap-2 shrink-0">
               <button onClick={() => downloadFeed('pdf')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download PDF</button>
-              <button onClick={() => downloadFeed('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download Export</button>
+              <button onClick={() => downloadFeed('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download Excel</button>
             </div>
           </div>
           <div className="overflow-x-auto">
@@ -561,8 +561,18 @@ export default function Stock() {
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={feedChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                  <XAxis dataKey="name" stroke="#9ca3af" fontSize={10} />
-                  <YAxis stroke="#9ca3af" fontSize={10} />
+                  <XAxis dataKey="name" stroke="#9ca3af" fontSize={10}  tick={{ fill: "#1f2937", fontSize: 10 }} label={{
+    value: "Product",
+    position: "insideBottom",
+    offset: -5,
+    style: { fontSize: 10 }
+  }} />
+                  <YAxis stroke="#9ca3af"  tick={{ fill: "#1f2937", fontSize: 10 }} fontSize={10}  label={{
+    value: "Quantity",
+    angle: -90,
+    position: "insideLeft",
+    style: { textAnchor: "middle", fontSize: 10 }
+  }}/>
                   <Tooltip contentStyle={{ backgroundColor: '#1a222d', border: '1px solid #374151' }} />
                   <Bar dataKey="closing" fill="#00c853" name="Closing" radius={[4, 4, 0, 0]} />
                 </BarChart>
@@ -579,8 +589,18 @@ export default function Stock() {
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={rmChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                  <XAxis dataKey="name" stroke="#9ca3af" fontSize={10} />
-                  <YAxis stroke="#9ca3af" fontSize={10} />
+                  <XAxis dataKey="name" stroke="#9ca3af" fontSize={10}  tick={{ fill: "#1f2937", fontSize: 10 }}label={{
+    value: "RM Type",
+    position: "insideBottom",
+    offset: -1,
+    style: { fontSize: 10 }
+  }}/>
+                  <YAxis stroke="#9ca3af" fontSize={10}  tick={{ fill: "#1f2937", fontSize: 10 }} label={{
+    value: "Quantity",
+    angle: -90,
+    position: "insideLeft",
+    style: { textAnchor: "middle", fontSize: 10 }
+  }}/>
                   <Tooltip contentStyle={{ backgroundColor: '#1a222d', border: '1px solid #374151' }} />
                   <Bar dataKey="closing" fill="#ffab00" name="Closing" radius={[4, 4, 0, 0]} />
                 </BarChart>

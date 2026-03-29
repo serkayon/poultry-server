@@ -167,6 +167,7 @@ export default function Dispatch() {
     (currentPage - 1) * rowsPerPage,
     currentPage * rowsPerPage
   )
+  const editingEntry = editingId ? list.find((row) => row.id === editingId) : null
 
   const totalPages = Math.ceil(filteredList.length / rowsPerPage)
 
@@ -563,14 +564,17 @@ export default function Dispatch() {
         {summaryCards.map((card, i) => (
           <div key={i} className="relative rounded-xl overflow-hidden shadow-md h-36 sm:h-40">
             <img src={card.bg} alt="bg" className="absolute inset-0 w-full h-full object-cover" />
+            <div className="absolute top-2 right-3 z-20 text-[11px] sm:text-xs font-bold text-orange-900 bg-white border border-orange-950 px-2 py-0.5 rounded">
+  {currentMonthLabel}
+</div>
             <div className="absolute top-0 left-0 w-full h-10">
               <img src={chalk} alt="texture" className="w-full h-full object-cover opacity-60" />
             </div>
-            <div className="relative z-10 flex items-center justify-between h-full px-4">
+            <div className="relative z-10 flex items-center h-full px-4">
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-800">
+                {/* <p className="text-[11px] font-semibold uppercase tracking-wide text-orange-800">
                   {currentMonthLabel}
-                </p>
+                </p> */}
                 <div className="flex items-center gap-2 text-orange-900 font-semibold text-xl">
                   <span>{card.title}</span>
                 </div>
@@ -606,16 +610,26 @@ export default function Dispatch() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search..."
-                className="pl-9 pr-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm w-48"
+                className="pl-9 pr-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm w-48  md:w-64"
               />
             </div>
           </div>
+
+
+           <div>
+            <label className="block text-xs text-gray-500 mb-1">Product Type</label>
+            <select value={filters.product_type} onChange={(e) => setFilters((f) => ({ ...f, product_type: e.target.value }))} className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm min-w-[150px]">
+              <option value="">All</option>
+              {productTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+
           <div>
-            <label className="block text-xs text-gray-500 mb-1">Date Range</label>
+            <label className="block text-xs text-gray-500 mb-1">Period</label>
             <select
               value={dateRangePreset}
               onChange={(e) => setDateRangePreset(e.target.value)}
-              className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm"
+              className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm min-w-[150px]"
             >
               <option value="today">Today</option>
               <option value="last_7">Last 7 Days</option>
@@ -646,13 +660,7 @@ export default function Dispatch() {
               </div>
             </>
           )}
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Product Type</label>
-            <select value={filters.product_type} onChange={(e) => setFilters((f) => ({ ...f, product_type: e.target.value }))} className="px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm">
-              <option value="">All</option>
-              {productTypes.map((t) => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </div>
+         
         </div>
 
         <div className="overflow-x-auto">
@@ -666,7 +674,6 @@ export default function Dispatch() {
                 <th className="px-4 py-3 text-left border border-gray-300">Total Bags</th>
                 <th className="px-4 py-3 text-left border border-gray-300">Total Weight</th>
                 <th className="px-4 py-3 text-left border border-gray-300">Price</th>
-                <th className="px-4 py-3 text-left border border-gray-300">Last Modified</th>
                 <th className="px-4 py-3 text-left border border-gray-300">Action</th>
                 <th className="px-4 py-3 text-left border border-gray-300">Download</th>
                 <th className="px-4 py-3 text-left border border-gray-300">Invoice</th>
@@ -675,7 +682,7 @@ export default function Dispatch() {
             <tbody>
               {paginatedList.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="px-4 py-4 text-gray-500 border border-gray-300">No dispatch entries found.</td>
+                  <td colSpan={10} className="px-4 py-4 text-gray-500 border border-gray-300">No dispatch entries found.</td>
                 </tr>
               )}
               {paginatedList.map((r) => (
@@ -693,7 +700,6 @@ export default function Dispatch() {
                   <td className="px-4 py-3 border border-gray-300">{r.total_bags}</td>
                   <td className="px-4 py-3 border border-gray-300">{r.total_weight}</td>
                   <td className="px-4 py-3 border border-gray-300">{r.price != null ? r.price : '—'}</td>
-                  <td className="px-4 py-3 border border-gray-300 text-xs">{formatDateTimeIST(r.last_modified_at)}</td>
                   <td className="px-4 py-3 border border-gray-300">
                     <button
                       onClick={() => requestPin(
@@ -704,7 +710,7 @@ export default function Dispatch() {
                           pinType: 'dispatch_edit',
                         }
                       )}
-                      className="px-2 py-1 text-xs border border-gray-500 rounded text-gray-900 hover:bg-gray-100"
+                      className="px-2 py-1 text-xs border rounded  bg-gray-600 text-white font-semibold hover:bg-gray-700"
                     >
                       Edit
                     </button>
@@ -1054,6 +1060,11 @@ export default function Dispatch() {
                 {editError}
               </div>
             )}
+            {editingEntry && (
+              <p className="text-xs text-gray-600">
+                Entry Date: {formatDateTimeIST(editingEntry.date)} | Last Modified: {formatDateTimeIST(editingEntry.last_modified_at || editingEntry.created_at)}
+              </p>
+            )}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
               <label className="block text-sm text-black mb-1">Date</label>
@@ -1245,12 +1256,12 @@ export default function Dispatch() {
               <button type="submit" className="px-4 py-2 rounded-lg bg-[#245658] text-white font-medium">Update Dispatch</button>
               <button type="button" onClick={() => setShowEdit(false)} className="px-4 py-2 rounded-lg border border-gray-400 text-black">Cancel</button>
             </div>
+            {editingEntry && (
+              <div className="text-right text-xs text-gray-600">
+                Created At: {formatDateTimeIST(editingEntry.created_at)}
+              </div>
+            )}
           </form>
-          {editingId && list.find(r => r.id === editingId) && (
-            <div className="absolute bottom-4 right-4 text-xs text-gray-500">
-              Created: {formatDateTimeIST(list.find(r => r.id === editingId).created_at)}
-            </div>
-          )}
         </div>
       </Modal>
 

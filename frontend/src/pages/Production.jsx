@@ -12,6 +12,7 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import productionBg from './assets/production.png'
+import batchwise from './assets/batch-wise.png'
 import searchIcon from "./assets/icons8-search-60.png";
 import {
   formatDateIST,
@@ -198,8 +199,8 @@ const currentMonthLabel = new Intl.DateTimeFormat('en-IN', {
   timeZone: 'Asia/Kolkata',
 }).format(new Date())
 const currentMonthProductionDisplay = currentMonthProductionMt.toLocaleString('en-IN', {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
+  minimumFractionDigits: 3,
+  maximumFractionDigits: 3,
 })
 
 const filteredBatches = batches.filter(b => {
@@ -285,12 +286,20 @@ const periodBatchLabel = (
 )
 
 useEffect(() => {
-  if (!selectedBatch) return
-  const stillInPeriodList = periodBatches.some((batch) => batch.id === selectedBatch.id)
-  if (stillInPeriodList) return
-  setSelectedBatch(null)
-  setBatchDetail(null)
+  if (periodBatches.length === 0) {
+    setSelectedBatch(null)
+    setBatchDetail(null)
+    setShowConsumptionReport(false)
+    return
+  }
+
+  const latestBatch = periodBatches[0]
+  const selectedInPeriod = selectedBatch && periodBatches.some((batch) => batch.id === selectedBatch.id)
+  if (selectedInPeriod) return
+
+  setSelectedBatch(latestBatch)
   setShowConsumptionReport(false)
+  productionApi.getBatch(latestBatch.id).then(({ data }) => setBatchDetail(data)).catch(() => setBatchDetail(null))
 }, [periodBatches, selectedBatch])
 
 useEffect(() => {
@@ -328,6 +337,14 @@ useEffect(() => {
   )
   const batchRunStatus = (batchDetail?.batch?.run_status || selectedBatch?.run_status || '').toLowerCase()
   const canEditBagOutput = reportModalMode !== 'edit' || batchRunStatus === 'completed'
+  const reportModalBatch = batchDetail?.batch || selectedBatch || null
+  const reportModalEntryDate = reportModalBatch?.date || null
+  const reportModalLastModified = reportModalBatch?.last_modified_at || reportModalBatch?.created_at || null
+  const reportModalCreatedAt = (
+    reportModalMode === 'edit'
+      ? (reportModalBatch?.created_at || null)
+      : (batchDetail?.report?.created_at || reportModalBatch?.created_at || null)
+  )
   const selectedRecipeForEdit = recipes.find((item) => item.name === String(reportForm.product_name || '').trim()) || null
   const normalizedReportMaterials = reportMaterials.map((item) => {
     const rawQty = String(item.quantity ?? '').trim()
@@ -765,22 +782,60 @@ const getRecipeMaterials = (productName) => {
     }}
   >
       <div className="absolute inset-0 bg-white/20"></div>
+{/* <div className="relative rounded-xl shadow-md overflow-hidden h-36 sm:h-40"> */}
+
+  {/* ✅ ADD THIS (top-right label like design) */}
+  <div className="absolute top-2 right-3 z-20 text-[11px] sm:text-xs font-bold border border-orange-950 text-[#7a2e0e] bg-white px-2 py-0.5 rounded">
+    {currentMonthLabel}
+  </div>
 
 
     {/* content */}
-    <div className="relative z-10 px-6">
-      <p className="text-sm font-medium text-[#7a2e0e]/90">
+    <div className="relative z-10 px-6  h-full flex flex-col justify-center text-center">
+      {/* <p className="text-sm font-medium text-[#7a2e0e]/90">
         {currentMonthLabel}
-      </p>
+      </p> */}
       <p className="text-2xl font-semibold text-[#7a2e0e]">
         Total Production
       </p>
       <p className="text-3xl font-bold text-[#7a2e0e]">
         {currentMonthProductionDisplay} <span className="text-base font-medium">MT</span>
       </p>
-    </div>
+    {/* </div> */}
+  </div>
+</div>
+
+ <div
+    className="relative rounded-2xl overflow-hidden shadow-md h-40 flex items-center"
+    style={{
+      backgroundImage: `url(${batchwise})`,
+      backgroundSize: 'cover',
+      backgroundPosition: 'center',
+    }}
+  >
+      <div className="absolute inset-0 bg-white/20"></div>
+{/* <div className="relative rounded-xl shadow-md overflow-hidden h-36 sm:h-40"> */}
+
+  {/* ✅ ADD THIS (top-right label like design) */}
+  <div className="absolute top-2 right-3 z-20 text-[11px] sm:text-xs font-bold border border-orange-950 text-[#7a2e0e] bg-white px-2 py-0.5 rounded">
+    {currentMonthLabel}
   </div>
 
+
+    {/* content */}
+    <div className="relative z-10 px-6  h-full flex flex-col justify-center text-center">
+      {/* <p className="text-sm font-medium text-[#7a2e0e]/90">
+        {currentMonthLabe
+      </p> */}
+      <p className="text-2xl font-semibold text-[#7a2e0e]">
+        Total Batch
+      </p>
+      <p className="text-3xl font-bold text-[#7a2e0e]">
+        10<span className="text-base font-medium"> batches</span>
+      </p>
+    {/* </div> */}
+  </div>
+</div>
 </div>
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         
@@ -857,7 +912,8 @@ const getRecipeMaterials = (productName) => {
               </button>
             </div>
             {batchForm.product_name ? (
-              <p className="text-xs text-gray-600">Materials are auto-filled from recipe. You can edit and add rows.</p>
+              // <p className="text-xs text-gray-600">Materials are auto-filled from recipe. You can edit and add rows.</p>
+                 <p className="text-xs text-gray-600">Select product to auto-fill recipe materials.</p>
             ) : (
               <p className="text-xs text-gray-600">Select product to auto-fill recipe materials.</p>
             )}
@@ -866,17 +922,24 @@ const getRecipeMaterials = (productName) => {
                 <div key={`batch-material-${index}`} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
                   <div className="md:col-span-7">
                     <label className="block text-xs text-black mb-1">Raw Material</label>
-                    <input
+                    {/* <input
                       type="text"
                       value={material.rm_name}
                       onChange={(e) => updateBatchMaterialRow(index, 'rm_name', e.target.value)}
                       className="w-full px-3 py-2 rounded border border-gray-300"
                       placeholder="Enter raw material"
-                    />
-                  </div>
-                  <div className="md:col-span-4">
-                    <label className="block text-xs text-black mb-1">Weight (kg)</label>
+                    /> */}
+
                     <input
+  type="text"
+  value={material.rm_name}
+  disabled
+  className="w-full px-3 py-2 rounded bg-gray-100 border border-gray-300 cursor-not-allowed"
+/>
+                  </div>
+                  <div className="md:col-span-5">
+                    <label className="block text-xs text-black mb-1">Weight (kg)</label>
+                    {/* <input
                       type="number"
                       step="any"
                       min="0"
@@ -884,7 +947,14 @@ const getRecipeMaterials = (productName) => {
                       onChange={(e) => updateBatchMaterialRow(index, 'quantity', e.target.value)}
                       className="w-full px-3 py-2 rounded border border-gray-300"
                       placeholder="0"
-                    />
+                    /> */}
+
+                    <input
+  type="number"
+  value={material.quantity}
+disabled
+  className="w-full px-3 py-2 rounded bg-gray-100 border border-gray-300 cursor-not-allowed"
+/>
                   </div>
                   <div className="md:col-span-1">
                     <button
@@ -932,7 +1002,7 @@ const getRecipeMaterials = (productName) => {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search..."
-          className="pl-9 pr-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm w-52 focus:ring-2 focus:ring-[#2F5D5D]"
+          className="pl-9  md:w-64 pr-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm w-52 focus:ring-2 focus:ring-[#2F5D5D]"
         />
       </div>
     </div>
@@ -1061,7 +1131,7 @@ const getRecipeMaterials = (productName) => {
 
 
                 <td className="px-4 py-3 border border-gray-300">
-  <div className="flex  whitespace-nowrap  gap-2">
+  <div className="flex whitespace-nowrap gap-2">
     <button
       onClick={() => requestPin(
         () => openReportModal(b, 'edit'),
@@ -1071,48 +1141,40 @@ const getRecipeMaterials = (productName) => {
           pinType: 'production_details_edit',
         }
       )}
-    className={`px-2 py-1 text-xs  border rounded hover:bg-gray-100 
-    ${b.mop && b.water 
-      ? "border-gray-500 text-gray-900 bg-white" 
-      : "bg-green-600 text-white font-semibold hover:bg-green-700"}
-  `}
->
-  {b.mop && b.water ? "Edit" : "Add Details"}
+      className={`px-2 py-1 text-xs border rounded hover:bg-gray-100 ${
+        b.mop != null && b.water != null
+          ? 'border-gray-500 text-gray-900 bg-white'
+          : 'bg-green-600 text-white font-semibold hover:bg-green-700'
+      }`}
+    >
+      {b.mop != null && b.water != null ? 'Edit Details' : 'Add Details'}
     </button>
-    {!b.has_report ? (
-      <button
-        onClick={() => requestPin(
-          () => openReportModal(b, 'report'),
-          {
-            title: 'PIN Required',
-            message: 'Enter PIN to edit/add batch report.',
-            pinType: 'production_report_access',
-          }
-        )}
-        className="px-2 py-1 text-xs bg-blue-600 text-white rounded"
-      >
-        Add Report
-      </button>
-    ) : (
-      <button
-        onClick={() => requestPin(
-          () => {
-            selectBatch(b);
-            setTimeout(() => {
-              reportRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-            }, 100) // small delay ensures report renders
-          },
-          {
-            title: 'PIN Required',
-            message: 'Enter PIN to view batch report.',
-            pinType: 'production_report_access',
-          }
-        )}
-        className="px-2 py-1 text-xs bg-blue-600 text-white rounded"
-      >
-        View Report
-      </button>
-    )}
+    <button
+      onClick={() => requestPin(
+        () => openReportModal(b, 'report'),
+        {
+          title: 'PIN Required',
+          message: 'Enter PIN to add/edit batch report.',
+          pinType: 'production_report_access',
+        }
+      )}
+      className={`px-2 py-1 text-xs rounded text-white ${
+        b.has_report ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-blue-600 hover:bg-blue-700'
+      }`}
+    >
+      {b.has_report ? 'Edit Report' : 'Add Report'}
+    </button>
+    <button
+      onClick={() => {
+        selectBatch(b)
+        setTimeout(() => {
+          reportRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+        }, 100)
+      }}
+      className="px-2 py-1 text-xs bg-slate-600 hover:bg-slate-700 text-white rounded"
+    >
+      View Report
+    </button>
   </div>
 </td>
                 </tr>
@@ -1173,13 +1235,53 @@ const getRecipeMaterials = (productName) => {
                 key={b.id}
                 onClick={() => selectBatch(b)}
                 className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
-                  selectedBatch?.id === b.id ? 'border-accent-green bg-accent-green/10 text-white' : 'border-gray-700 bg-primary-card text-gray-300 hover:border-gray-600'
+                  selectedBatch?.id === b.id ? 'border-accent-green bg-accent-green/5 text-white' : 'border-gray-700 bg-primary-card text-gray-300 hover:border-gray-600'
                 }`}
               >
-                <span className="font-medium text-gray-900">Batch #{b.batch_no || b.id}</span>
+                {/* <span className="font-medium text-gray-900">Batch #{b.batch_no || b.id}</span>
+                
                 <span className="block text-sm opacity-80 text-gray-900">
                   {b.progress_label || '—'} • {(b.run_status || 'pending').toUpperCase()} • {b.product_name || 'Product pending'}
-                </span>
+                </span> */}
+
+              <div className="flex flex-col gap-1">
+
+  {/* Batch */}
+  <span className="text-base font-bold text-gray-900">
+    Batch #{b.batch_no || b.id}
+  </span>
+
+  
+  <span className="text-lg font-extrabold text-[#245658] py-0.5 rounded w-fit">
+    {b.product_name || 'Product pending'}
+  </span>
+
+  {/* Status Row */}
+  <div className="flex items-center gap-2 text-xs font-bold">
+
+    {/* Progress */}
+    <span className="text-gray-700">
+      {b.progress_label || '—'}
+    </span>
+
+    <span className="text-gray-400">•</span>
+
+    {/* Status Color */}
+    <span
+      className={`px-2 py-0.5 rounded 
+        ${(b.run_status || 'pending').toLowerCase() === 'completed' 
+          ? 'bg-green-100 text-green-700 border border-green-700'
+          : (b.run_status || 'pending').toLowerCase() === 'running'
+          ? 'bg-blue-100 text-blue-700 border border-blue-700'
+          : 'bg-yellow-100 text-yellow-800 border border-yellow-700'
+        }`}
+    >
+      {(b.run_status || 'pending').toUpperCase()}
+    </span>
+
+  </div>
+
+</div>
               </button>
             ))}
           </div>
@@ -1187,7 +1289,7 @@ const getRecipeMaterials = (productName) => {
          </div>
         <div className="lg:col-span-2">
           <h2 className="text-sm font-medium text-gray-900 mb-3">Batch-wise Report</h2>
-          {!selectedBatch && <p className="text-gray-800 text-sm">Select a batch above to view its report.</p>}
+          {!selectedBatch && periodBatches.length === 0 && <p className="text-gray-800 text-sm">No batches available for selected period.</p>}
           {selectedBatch && batchDetail && (
             <div className="bg-primary-card border border-gray-700 rounded-xl p-4 space-y-6">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -1302,27 +1404,33 @@ const getRecipeMaterials = (productName) => {
               </div>
               {showConsumptionReport && (
                 <div ref={consumptionRef} className="border-t border-gray-700 pt-4 space-y-3">
-                  <p className="text-sm font-semibold text-red-700">CONSUMPTION REPORT</p>
-                  <p className="text-sm text-red-700">Consumption calculated on basis of total Batch Count * total weight of that batch.</p>
-                  <p className="text-sm text-red-700">All RM materials used in this batch are shown below.</p>
-                  <div className="flex flex-wrap gap-2">
+                  <div className='flex justify-between items-center'>
+                  <p className="text-sm font-medium text-gray-900">CONSUMPTION REPORT</p>
+                    <div className="flex flex-wrap gap-2">
                     <button
                       onClick={() => downloadConsumptionReport(selectedBatch.id, "pdf")}
                       className="px-3 py-1.5 text-xs bg-red-500 text-white rounded"
                     >
-                      Download Consumption PDF
+                       <span className="hidden sm:inline">Download PDF</span>
+        <span className="sm:hidden">PDF</span>
                     </button>
                     <button
                       onClick={() => downloadConsumptionReport(selectedBatch.id, "xlsx")}
                       className="px-3 py-1.5 text-xs bg-green-600 text-white rounded"
                     >
-                      Download Consumption Excel
+                          <span className="hidden sm:inline">Download Excel</span>
+        <span className="sm:hidden">Excel</span>
+
                     </button>
                   </div>
+                     </div>
+                  <p className="text-sm text-gray-900">Consumption calculated on basis of total Batch Count * total weight of that batch.</p>
+                  <p className="text-sm text-gray-900">All RM materials used in this batch are shown below.</p>
+                
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm border border-gray-400">
                       <thead>
-                        <tr className="text-left text-red-700">
+                        <tr className="text-left text-[#245658]">
                           <th className="px-3 py-2 border border-gray-400">RM NAME</th>
                           <th className="px-3 py-2 border border-gray-400">WEIGHT/BATCH</th>
                           <th className="px-3 py-2 border border-gray-400">TOTAL BATCH</th>
@@ -1332,22 +1440,22 @@ const getRecipeMaterials = (productName) => {
                       <tbody>
                         {selectedConsumptionRows.map((row, idx) => (
                           <tr key={`${row.rm_name}-${idx}`}>
-                            <td className="px-3 py-1.5 border border-gray-300 text-red-700">{row.rm_name}</td>
-                            <td className="px-3 py-1.5 border border-gray-300 text-red-700">{row.weight_per_batch.toFixed(2)}</td>
-                            <td className="px-3 py-1.5 border border-gray-300 text-red-700">{row.total_batch.toFixed(2)}</td>
-                            <td className="px-3 py-1.5 border border-gray-300 text-red-700">{row.total_weight.toFixed(2)}</td>
+                            <td className="px-3 py-1.5 border border-gray-300 text-gray-900">{row.rm_name}</td>
+                            <td className="px-3 py-1.5 border border-gray-300 text-gray-900">{row.weight_per_batch.toFixed(2)}</td>
+                            <td className="px-3 py-1.5 border border-gray-300 text-gray-900">{row.total_batch.toFixed(2)}</td>
+                            <td className="px-3 py-1.5 border border-gray-300 text-gray-900">{row.total_weight.toFixed(2)}</td>
                           </tr>
                         ))}
                         <tr className="font-semibold">
-                          <td className="px-3 py-1.5 border border-gray-300 text-red-700">TOTAL</td>
-                          <td className="px-3 py-1.5 border border-gray-300 text-red-700">{selectedConsumptionTotal.weight_per_batch.toFixed(2)}</td>
-                          <td className="px-3 py-1.5 border border-gray-300 text-red-700">{selectedConsumptionTotal.total_batch.toFixed(2)}</td>
-                          <td className="px-3 py-1.5 border border-gray-300 text-red-700">{selectedConsumptionTotal.total_weight.toFixed(2)}</td>
+                          <td className="px-3 py-1.5 border border-gray-300 text-gray-900">TOTAL</td>
+                          <td className="px-3 py-1.5 border border-gray-300 text-gray-900">{selectedConsumptionTotal.weight_per_batch.toFixed(2)}</td>
+                          <td className="px-3 py-1.5 border border-gray-300 text-gray-900">{selectedConsumptionTotal.total_batch.toFixed(2)}</td>
+                          <td className="px-3 py-1.5 border border-gray-300 text-gray-900">{selectedConsumptionTotal.total_weight.toFixed(2)}</td>
                         </tr>
                       </tbody>
                     </table>
                   </div>
-                  <p className="text-sm text-red-700">In this batch, consumption is calculated by weight and formula based on batch run.</p>
+                  <p className="text-sm text-gray-950">In this batch, consumption is calculated by weight and formula based on batch run.</p>
                 </div>
               )}
               {report && (
@@ -1359,8 +1467,18 @@ const getRecipeMaterials = (productName) => {
                         <ResponsiveContainer width="100%" height="100%">
                           <BarChart data={chemicalChartData} layout="vertical" >
                             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                            <XAxis type="number" stroke="#9ca3af" fontSize={10} />
-                            <YAxis type="category" dataKey="name" stroke="#556D7C" fontSize={10} width={70} />
+                            <XAxis type="number" stroke="#9ca3af" fontSize={10}   label={{
+    value: "Quantity (%)",
+    position: "insideBottom",
+    offset: 1,
+    style: { fontSize: 11, fill: "#475569" }
+  }}/>
+                            <YAxis type="category" dataKey="name" stroke="#556D7C" fontSize={10} width={70}   label={{
+    value: "Chemical Parameters",
+    angle: -90,
+    position: "insideLeft",
+    style: { textAnchor: "middle", fontSize: 11, fill: "#475569" }
+  }}/>
                             <Tooltip contentStyle={{ backgroundColor: '#1a222d', border: '1px solid #374151' }} />
                             <Bar dataKey="value" fill="#00c853" name="Value (%)" radius={[0, 4, 4, 0]} />
                           </BarChart>
@@ -1377,8 +1495,18 @@ const getRecipeMaterials = (productName) => {
                         <ResponsiveContainer width="100%" height="100%">
                           <BarChart data={physicalChartData} layout="vertical" >
                             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                            <XAxis type="number" stroke="#9ca3af" fontSize={10} />
-                            <YAxis type="category" dataKey="name" stroke="#556D7C" fontSize={10} width={85} />
+                            <XAxis type="number" stroke="#9ca3af" fontSize={10} label={{
+    value: "Quantity (%)",
+    position: "insideBottom",
+    offset: 1,
+    style: { fontSize: 11, fill: "#475569" }
+  }}/>
+                            <YAxis type="category" dataKey="name" stroke="#556D7C" fontSize={10} width={85}   label={{
+    value: "Physical Parameters",
+    angle: -90,
+    position: "insideLeft",
+    style: { textAnchor: "middle", fontSize: 11, fill: "#475569" }
+  }}/>
                             <Tooltip contentStyle={{ backgroundColor: '#1a222d', border: '1px solid #374151' }} />
                             <Bar dataKey="value" fill="#ffab00" name="Value" radius={[0, 4, 4, 0]} />
                           </BarChart>
@@ -1399,6 +1527,11 @@ const getRecipeMaterials = (productName) => {
             <div className="bg-red-100 text-red-800 px-4 py-3 rounded-lg text-sm border border-red-300">
               {reportError}
             </div>
+          )}
+          {reportModalBatch && reportModalMode !== 'edit' && (
+            <p className="text-xs text-gray-600">
+              Entry Date: {formatDateTimeIST(reportModalEntryDate)} | Last Modified: {formatDateTimeIST(reportModalLastModified, 'N/A')}
+            </p>
           )}
           <p className="text-black text-sm">
             {reportModalMode === 'edit'
@@ -1435,6 +1568,11 @@ const getRecipeMaterials = (productName) => {
                 </div>
               )}
             </div>
+            {reportModalBatch && (
+              <p className="text-xs text-gray-600 mb-2">
+                Entry Date: {formatDateTimeIST(reportModalEntryDate)} | Last Modified: {formatDateTimeIST(reportModalLastModified, 'N/A')}
+              </p>
+            )}
             <p className="text-xs text-black mb-2">Batch Details</p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div>
@@ -1548,16 +1686,16 @@ const getRecipeMaterials = (productName) => {
             <div className="mt-3 space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-xs text-black">Recipe Materials</p>
-                <button
+                {/* <button
                   type="button"
                   onClick={addReportMaterialRow}
                   className="px-2 py-1 rounded border border-gray-600 text-xs text-black"
                 >
                   + Add Material
-                </button>
+                </button> */}
               </div>
               {reportForm.product_name ? (
-                <p className="text-xs text-gray-600">Materials are auto-filled from recipe. You can edit kg values.</p>
+                  <p className="text-xs text-gray-600">Select product to auto-fill recipe materials.</p>
               ) : (
                 <p className="text-xs text-gray-600">Select product to auto-fill recipe materials.</p>
               )}
@@ -1566,17 +1704,23 @@ const getRecipeMaterials = (productName) => {
                   <div key={`report-material-${index}`} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
                     <div className="md:col-span-7">
                       <label className="block text-xs text-black mb-1">Raw Material</label>
-                      <input
+                      {/* <input
                         type="text"
                         value={material.rm_name}
                         onChange={(e) => updateReportMaterialRow(index, 'rm_name', e.target.value)}
                         className="w-full px-3 py-2 rounded border border-gray-300 text-sm"
                         placeholder="Enter raw material"
-                      />
+                      /> */}
+                                       <input
+  type="text"
+  value={material.rm_name}
+  disabled
+  className="w-full px-3 py-2 rounded bg-gray-100 border border-gray-300 cursor-not-allowed"
+/>
                     </div>
-                    <div className="md:col-span-4">
+                    <div className="md:col-span-5">
                       <label className="block text-xs text-black mb-1">Weight (kg)</label>
-                      <input
+                      {/* <input
                         type="number"
                         step="any"
                         min="0"
@@ -1584,9 +1728,16 @@ const getRecipeMaterials = (productName) => {
                         onChange={(e) => updateReportMaterialRow(index, 'quantity', e.target.value)}
                         className="w-full px-3 py-2 rounded border border-gray-300 text-sm"
                         placeholder="0"
-                      />
+                      /> */}
+                      
+                    <input
+  type="number"
+  value={material.quantity}
+disabled
+  className="w-full px-3 py-2 rounded bg-gray-100 border border-gray-300 cursor-not-allowed"
+/>
                     </div>
-                    <div className="md:col-span-1">
+                    {/* <div className="md:col-span-1">
                       <button
                         type="button"
                         onClick={() => removeReportMaterialRow(index)}
@@ -1594,7 +1745,7 @@ const getRecipeMaterials = (productName) => {
                       >
                         X
                       </button>
-                    </div>
+                    </div> */}
                   </div>
                 ))}
               </div>
@@ -1609,10 +1760,7 @@ const getRecipeMaterials = (productName) => {
                 Bag count and weight can be entered only after batch count completion in HMI.
               </p>
             )}
-            <p className="text-xs text-gray-600 mt-2">
-              Last Modified: {formatDateTimeIST(batchDetail?.batch?.last_modified_at, '—')}
-            </p>
-          </div>
+</div>
           )}
           {reportModalMode !== 'edit' && (
             <>
@@ -1644,6 +1792,11 @@ const getRecipeMaterials = (productName) => {
             <button type="submit" className="px-4 py-2 rounded-lg bg-accent-green text-primary font-medium">Submit</button>
             <button type="button" onClick={() => { setShowReport(false); setReportError(''); setReportMaterials([{ ...EMPTY_MATERIAL_ROW }]); }} className="px-4 py-2 rounded-lg border border-gray-600 text-gray-900">Cancel</button>
           </div>
+          {reportModalBatch && (
+            <div className="text-right text-xs text-gray-600">
+              Created At: {formatDateTimeIST(reportModalCreatedAt, 'N/A')}
+            </div>
+          )}
         </form>
       </Modal>
       {pinDialog}

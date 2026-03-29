@@ -514,7 +514,7 @@ useEffect(() => {
 
   {/* Total Stock */}
 <div className="relative rounded-xl overflow-hidden shadow-md h-36 sm:h-40">
-  <div className="absolute top-2 right-3 z-20 text-[11px] sm:text-xs font-semibold text-[#263C2C] bg-white/80 px-2 py-0.5 rounded">
+  <div className="absolute top-2 right-3 z-20 text-[11px] sm:text-xs font-semibold text-[#263C2C] bg-white border border-green-900 px-2 py-0.5 rounded">
     {currentMonthLabel}
   </div>
   {/* background image */}
@@ -551,7 +551,7 @@ useEffect(() => {
 
   {/* Total Usage */}
 <div className="relative rounded-xl shadow-md overflow-hidden h-36 sm:h-40">
-  <div className="absolute top-2 right-3 z-20 text-[11px] sm:text-xs font-semibold text-[#263C2C] bg-white/80 px-2 py-0.5 rounded">
+  <div className="absolute top-2 right-3 z-20 text-[11px] sm:text-xs font-semibold text-[#263C2C] bg-white border border-green-900 px-2 py-0.5 rounded">
     {currentMonthLabel}
   </div>
 
@@ -669,7 +669,7 @@ useEffect(() => {
       <select
         value={rmTypeFilter}
         onChange={(e) => setRmTypeFilter(e.target.value)}
-        className="border border-gray-400 rounded-lg px-3 py-2 text-sm"
+        className="border border-gray-400 rounded-lg px-3 py-2 text-sm min-w-[150px]"
       >
         <option value="">All</option>
         {[...new Set(entries.map(e => e.rm_type))].map(type => (
@@ -680,11 +680,11 @@ useEffect(() => {
 
     {/* Date Range */}
     <div>
-      <label className="block text-xs text-gray-500 mb-1">Date Range</label>
+      <label className="block text-xs text-gray-500 mb-1">Period</label>
       <select
         value={dateRangePreset}
         onChange={(e) => setDateRangePreset(e.target.value)}
-        className="border border-gray-400 rounded-lg px-3 py-2 text-sm"
+        className="border border-gray-400 rounded-lg px-3 py-2 text-sm min-w-[150px]"
       >
         <option value="today">Today</option>
         <option value="last_7">Last 7 Days</option>
@@ -726,7 +726,6 @@ useEffect(() => {
      <thead className="bg-[#245658] text-white border-b border-gray-300">
         <tr>
           <th className="px-4 py-3 text-left border border-gray-300">Entry Date & Time</th>
-          <th className="px-4 py-3 text-left border border-gray-300">Last Modified</th>
           <th className="px-4 py-3 text-left border border-gray-300">RM Type</th>
           <th className="px-4 py-3 text-left border border-gray-300">Supplier</th>
           <th className="px-4 py-3 text-left border border-gray-300">Challan No</th>
@@ -743,7 +742,6 @@ useEffect(() => {
         {paginatedEntries.map((e) => (
           <tr key={e.id} className=" hover:bg-gray-50">
             <td className="px-4 py-3 border border-gray-300">{formatDateTimeIST(e.date)}</td>
-            <td className="px-4 py-3 border border-gray-300">{formatDateTimeIST(e.last_modified_at || e.created_at)}</td>
             <td className="px-4 py-3 border border-gray-300">{e.rm_type}</td>
             <td className="px-4 py-3 border border-gray-300">{e.supplier}</td>
             <td className="px-4 py-3 border border-gray-300">{e.challan_no}</td>
@@ -765,7 +763,8 @@ useEffect(() => {
                         pinType: 'rm_entry_edit',
                       }
 	                  )}
-	                  className="text-blue-700 font-medium underline"
+	                  // className="text-blue-700 font-medium underline"
+                       className="px-2 py-1 text-xs border rounded  bg-gray-600 text-white font-semibold hover:bg-gray-700 text-nowrap"
 	                >
 	                  Edit Entry
 	                </button>
@@ -778,7 +777,7 @@ useEffect(() => {
                         pinType: 'rm_lab_edit',
                       }
 	                  )}
-	                  className="text-green-700 font-medium underline"
+	                  className="px-2 py-1 text-xs border rounded  bg-blue-600 text-white font-semibold hover:bg-blue-700 text-nowrap"
 	                >
 	                  Edit Lab
 	                </button>
@@ -788,13 +787,13 @@ useEffect(() => {
 	              <div className="flex items-center gap-3">
 	                <button
 	                  onClick={() => downloadEntryReport(e.id, 'pdf')}
-	                  className="text-red-700 font-medium underline"
+	                  className="px-2 py-1 text-xs border rounded  bg-red-600 text-white font-semibold hover:bg-red-500 text-nowrap"
 	                >
 	                  PDF
 	                </button>
 	                <button
 	                  onClick={() => downloadEntryReport(e.id, 'xlsx')}
-	                  className="text-emerald-700 font-medium underline"
+	                  className="px-2 py-1 text-xs border rounded  bg-green-600 text-white font-semibold hover:bg-green-700 text-nowrap"
 	                >
 	                  Excel
 	                </button>
@@ -1163,8 +1162,11 @@ useEffect(() => {
                 {labError}
               </div>
             )}
-            <p className="text-black text-sm mb-4">
-              Date: {formatDateTimeIST(selectedEntry.date)} | RM Type: {selectedEntry.rm_type} | Supplier: {selectedEntry.supplier} | Challan: {selectedEntry.challan_no} | Vehicle: {selectedEntry.vehicle_no} | Weight: {selectedEntry.total_weight} | Remarks: {selectedEntry.remarks || '—'}
+            <p className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-3 py-2 mb-2">
+              Date: {formatDateTimeIST(selectedEntry.date)} | RM Type: {selectedEntry.rm_type} | Supplier: {selectedEntry.supplier} | Challan: {selectedEntry.challan_no} | Vehicle: {selectedEntry.vehicle_no} | Weight: {selectedEntry.total_weight} | Remarks: {selectedEntry.remarks || '-'}
+            </p>
+            <p className="text-xs text-gray-600 mb-4">
+              Entry Date: {formatDateTimeIST(selectedEntry.date)} | Last Modified: {formatDateTimeIST(selectedEntry.last_modified_at || selectedEntry.created_at)}
             </p>
             <form onSubmit={handleLabSubmit} className="space-y-4    md:pb-4 overflow-y-auto">
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
@@ -1191,6 +1193,9 @@ useEffect(() => {
               <div className="flex gap-2 pt-4 ">
                 <button type="submit" className="px-4 py-2 rounded-lg bg-accent-green text-primary font-medium">Submit</button>
                 <button type="button" onClick={() => { setShowLab(false); setSelectedEntry(null) }} className="px-4 py-2 rounded-lg border border-gray-600 text-gray-900">Cancel</button>
+              </div>
+              <div className="text-right text-xs text-gray-600">
+                Created At: {formatDateTimeIST(selectedEntry.created_at)}
               </div>
             </form>
           </>

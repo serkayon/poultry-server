@@ -58,7 +58,8 @@ const [showConfirmPin, setShowConfirmPin] = useState(false);
   const [pinError, setPinError] = useState('')
   const [pinSuccess, setPinSuccess] = useState('')
   const [pinSaving, setPinSaving] = useState(false)
-
+const [showRmPopup, setShowRmPopup] = useState(false)
+const [showError, setShowError] = useState(false)
   const load = () => {
     rawMaterial.listTypes().then(({ data }) => setRmTypes(Array.isArray(data) ? data : []))
     configApi.productTypesManage().then(({ data }) => setProductTypes(Array.isArray(data) ? data : []))
@@ -73,7 +74,11 @@ const [showConfirmPin, setShowConfirmPin] = useState(false);
     setNewRmType("")
     load()
   }
-
+const handleClosePopup = () => {
+  setShowRmPopup(false)
+  setNewRmType("")     
+  setShowError(false) 
+}
   const openEditRmTypeModal = (type) => {
     setEditingRmType(type)
     setRmTypeFormName(type?.name || "")
@@ -519,9 +524,93 @@ const handleClosePinModal = () => {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* RM TYPES - LEFT COLUMN */}
         <div className="border border-gray-400 rounded-lg p-4">
+          <div className="flex items-center justify-between gap-3">
           <h2 className="font-medium mb-3">Raw Material Types</h2>
+          <button
+  onClick={() => setShowRmPopup(true)}
+  className="px-2 py-2 bg-[#245658] text-white rounded"
+>
+ + Add RM Type
+</button>
+          </div>
+          {showRmPopup && (
+  <div
+    className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 "
+    onClick={handleClosePopup} 
+  >
 
-          <div className="flex gap-2 mb-3">
+    <div
+      className="bg-white w-[400px] rounded-xl shadow-lg sm:m-1 m-4"
+      onClick={(e) => e.stopPropagation()}
+    >
+
+      {/* HEADER */}
+      <div className="flex items-center justify-between px-4 py-3 border-b">
+        <h2 className="text-lg font-semibold">Add Raw Material Type</h2>
+
+        <button
+          onClick={handleClosePopup}
+          className="text-gray-700 hover:text-black text-lg"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* BODY */}
+      <div className="p-4 space-y-2">
+     <label className="block text-sm text-black mb-1">Enter Raw Material Type</label>
+        <input
+          value={newRmType}
+          onChange={(e) => {
+            setNewRmType(e.target.value)
+            if (e.target.value.trim()) setShowError(false) // ✅ remove error while typing
+          }}
+          placeholder="Enter RM Type"
+          className={`w-full border border-gray-600 px-3 py-2 rounded ${
+            showError ? "border-red-400" : "border-gray-300"
+          }`}
+        />
+
+        {/* ERROR ONLY AFTER CLICK */}
+        {showError && (
+          <p className="text-xs text-red-500">
+            Raw Material is required
+          </p>
+        )}
+
+      </div>
+
+      {/* FOOTER */}
+      <div className="flex justify-end gap-2 px-4 py-3 border-t">
+
+        <button
+          onClick={handleClosePopup}
+          className="px-4 py-2 border border-gray-600 rounded"
+        >
+          Cancel
+        </button>
+
+        <button
+          onClick={() => {
+            if (!newRmType.trim()) {
+              setShowError(true)
+              return
+            }
+
+            addRmType()
+            handleClosePopup() 
+          }}
+          className="px-4 py-2 bg-[#245658] text-white rounded"
+        >
+          Add RM Type
+        </button>
+
+      </div>
+
+    </div>
+  </div>
+)}
+      {/* <div className="flex gap-2 mb-3">
             <input
               value={newRmType}
               onChange={(e)=>setNewRmType(e.target.value)}
@@ -534,7 +623,7 @@ const handleClosePinModal = () => {
             >
               Add
             </button>
-          </div>
+          </div> */}
 
           <div className="mt-4  rounded-md p-3 bg-slate-50">
             <p className="text-sm font-medium text-slate-700 mb-2">
