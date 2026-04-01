@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # Allow both:
-# 1) package execution: `uvicorn app.main:app --reload --host 127.0.0.1 --port 8007`
+# 1) package execution: `uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`
 # 2) direct script execution inside backend/app: `python main.py`
 if __package__ in (None, ""):
     import sys
@@ -20,4 +20,4 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8007, reload=True)
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)

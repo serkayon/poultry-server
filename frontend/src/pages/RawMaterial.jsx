@@ -119,6 +119,10 @@ export default function RawMaterial() {
   const [entries, setEntries] = useState([])
   const [rmTypes, setRmTypes] = useState([])
   const [rmStockRows, setRmStockRows] = useState([])
+  const [currentMonthSummary, setCurrentMonthSummary] = useState({
+    total_stock_kg: 0,
+    total_received_kg: 0,
+  })
   const [showAdd, setShowAdd] = useState(false)
   const [addError, setAddError] = useState('')
   const [showAddType, setShowAddType] = useState(false)
@@ -205,17 +209,12 @@ const downloadExcel = () => {
 };
 
 const filteredEntries = entries.filter(e => {
-const entryDate = toDateInputIST(e.date, "");
   return (
     (
       e.rm_type.toLowerCase().includes(search.toLowerCase()) ||
       e.supplier.toLowerCase().includes(search.toLowerCase()) ||
       e.vehicle_no.toLowerCase().includes(search.toLowerCase())
-	    ) &&
-	    (rmTypeFilter ? e.rm_type === rmTypeFilter : true) &&
-	
-	  (effectiveFromDate ? entryDate >= effectiveFromDate : true) &&
-	(effectiveToDate ? entryDate <= effectiveToDate : true)
+	    )
 	  );
 });
 
@@ -235,26 +234,58 @@ useEffect(() => {
   const [labForm, setLabForm] = useState(emptyLabForm())
 
   const load = () => {
-    // rawMaterial.list().then(({ data }) => 
-      
-    //   setEntries(data)
-      
-    // ).catch(() => setEntries([]))
-      rawMaterial.list()
-    .then(({ data }) => {
-      const sorted = (data || []).sort((a, b) => {
-        const bDate = parseApiDate(b.date)?.getTime() ?? Number.NEGATIVE_INFINITY
-        const aDate = parseApiDate(a.date)?.getTime() ?? Number.NEGATIVE_INFINITY
-        if (bDate !== aDate) return bDate - aDate
-        return (Number(b.id) || 0) - (Number(a.id) || 0)
+    const period = dateRangePreset
+    const rmType = rmTypeFilter || "all"
+    const params = {}
+    if (period === "custom") {
+      if (effectiveFromDate) {
+        params.from_date = toApiDateTimeFrom12HourInput(effectiveFromDate, "12", "00", "AM")
+      }
+      if (effectiveToDate) {
+        params.to_date = toApiDateTimeFrom12HourInput(effectiveToDate, "11", "59", "PM")
+      }
+    }
+
+    rawMaterial
+      .listByPeriod(period, rmType, params)
+      .then(({ data }) => {
+        const sorted = (data || []).sort((a, b) => {
+          const bDate = parseApiDate(b.date)?.getTime() ?? Number.NEGATIVE_INFINITY
+          const aDate = parseApiDate(a.date)?.getTime() ?? Number.NEGATIVE_INFINITY
+          if (bDate !== aDate) return bDate - aDate
+          return (Number(b.id) || 0) - (Number(a.id) || 0)
+        })
+        setEntries(sorted)
       })
-      setEntries(sorted)
-    })
-    .catch(() => setEntries([]))
+      .catch(() => setEntries([]))
+  }
+
+  const loadMeta = () => {
     rawMaterial.listTypes().then(({ data }) => setRmTypes(data)).catch(() => setRmTypes([]))
     stockApi.rm().then(({ data }) => setRmStockRows(data || [])).catch(() => setRmStockRows([]))
   }
-  useEffect(() => { load() }, [])
+
+  const loadCurrentMonthSummary = () => {
+    rawMaterial.summaryByPeriod("this_month", "all")
+      .then(({ data }) => {
+        setCurrentMonthSummary({
+          total_stock_kg: Number(data?.total_stock_kg || 0),
+          total_received_kg: Number(data?.total_received_kg || 0),
+        })
+      })
+      .catch(() =>
+        setCurrentMonthSummary({
+          total_stock_kg: 0,
+          total_received_kg: 0,
+        })
+      )
+  }
+
+  useEffect(() => { load() }, [dateRangePreset, effectiveFromDate, effectiveToDate, rmTypeFilter])
+  useEffect(() => {
+    loadMeta()
+    loadCurrentMonthSummary()
+  }, [])
 
   const latestStockByName = rmStockRows.reduce((acc, row) => {
     const current = acc[row.rm_name]
@@ -265,26 +296,11 @@ useEffect(() => {
     }
     return acc
   }, {})
-  const currentMonthKey = todayDateInputIST().slice(0, 7)
   const currentMonthLabel = new Intl.DateTimeFormat("en-IN", {
     timeZone: IST_TIME_ZONE,
     month: "long",
     year: "numeric",
   }).format(new Date())
-  const isCurrentMonth = (value) =>
-    String(toDateInputIST(value, "") || "").startsWith(currentMonthKey)
-
-  const latestStockByNameCurrentMonth = rmStockRows
-    .filter((row) => isCurrentMonth(row?.date))
-    .reduce((acc, row) => {
-      const current = acc[row.rm_name]
-      const rowTime = parseApiDate(row.date)?.getTime() || Number.NEGATIVE_INFINITY
-      const currentTime = parseApiDate(current?.date)?.getTime() || Number.NEGATIVE_INFINITY
-      if (!current || rowTime > currentTime) {
-        acc[row.rm_name] = row
-      }
-      return acc
-    }, {})
 
   // const individualStock = rmTypes
   //   .map((t) => ({
@@ -309,22 +325,9 @@ useEffect(() => {
     .filter((row) => row.rm_name && Number.isFinite(row.closing_stock) && row.closing_stock > 0)
     .sort((a, b) => b.closing_stock - a.closing_stock)
 
-  const currentMonthStockRows = rmTypes
-    .slice()
-    .reverse()
-    .map((t) => ({
-      rm_name: t.name,
-      closing_stock: latestStockByNameCurrentMonth[t.name]?.closing_stock ?? 0,
-    }))
-  const totalStockWeight = currentMonthStockRows.reduce(
-    (sum, item) => sum + (Number(item.closing_stock) || 0),
-    0
-  )
-  const totalInwardWeight = entries.reduce(
-    (sum, item) => sum + (isCurrentMonth(item?.date) ? (Number(item.total_weight) || 0) : 0),
-    0
-  )
-  const toMtDisplay = (kgValue) => `${(Number(kgValue || 0) / 1000).toFixed(3)} MT`
+  const totalStockWeight = Number(currentMonthSummary.total_stock_kg || 0)
+  const totalInwardWeight = Number(currentMonthSummary.total_received_kg || 0)
+  const toMtDisplay = (kgValue) => `${Number((Number(kgValue || 0) / 1000).toFixed(3))} MT`
 
   const handleAdd = async (e) => {
     e.preventDefault()
@@ -350,6 +353,8 @@ useEffect(() => {
       setAddError('')
       setCurrentPage(1)
       load()
+      loadMeta()
+      loadCurrentMonthSummary()
     } catch (err) {
       const detail = err?.response?.data?.detail || 'Unable to create entry.'
       setAddError(detail)
@@ -408,6 +413,8 @@ useEffect(() => {
       })
       closeEdit()
       load()
+      loadMeta()
+      loadCurrentMonthSummary()
     } catch (err) {
       const detail = err?.response?.data?.detail || 'Unable to update RM entry.'
       setEditError(detail)
@@ -448,7 +455,10 @@ useEffect(() => {
     }
     setShowLab(true)
   }
-
+const formatMt = (valueKg) => {
+  const safeKg = Math.max(0, Number(valueKg) || 0);
+  return Number((safeKg / 1000).toFixed(3));
+};
   const handleLabSubmit = async (e) => {
     e.preventDefault()
     setLabError('')
@@ -633,7 +643,7 @@ useEffect(() => {
         <p className="text-gray-900 text-sm mb-3">New RM name will be added to Raw Material report and RM stock.</p>
         <input type="text" value={newRmType} onChange={(e) => setNewRmType(e.target.value)} placeholder="e.g. MAIZE, SOYA" className="w-full px-3 py-2 rounded-lg bg-primary-light border border-gray-600 text-gray-900 mb-4" />
         <div className="flex gap-2">
-          <button onClick={async () => { await rawMaterial.addType(newRmType); setShowAddType(false); setNewRmType(''); load() }} className="px-4 py-2 rounded-lg bg-accent-green text-primary font-medium" disabled={!newRmType.trim()}>Add</button>
+          <button onClick={async () => { await rawMaterial.addType(newRmType); setShowAddType(false); setNewRmType(''); loadMeta() }} className="px-4 py-2 rounded-lg bg-accent-green text-primary font-medium" disabled={!newRmType.trim()}>Add</button>
           <button onClick={() => { setShowAddType(false); setNewRmType('') }} className="px-4 py-2 rounded-lg border border-gray-600 text-gray-900">Cancel</button>
         </div>
       </Modal>
@@ -779,7 +789,7 @@ useEffect(() => {
 	                  )}
 	                  className="px-2 py-1 text-xs border rounded  bg-blue-600 text-white font-semibold hover:bg-blue-700 text-nowrap"
 	                >
-	                  Edit Lab
+	                 {e.has_lab_report ? 'Edit Lab' : 'Add Lab Report'}
 	                </button>
 	              </div>
 	            </td>
@@ -882,7 +892,8 @@ useEffect(() => {
             <thead className="bg-[#245658] text-white">
               <tr>
                 <th className="px-4 py-3 text-left border border-gray-300">RM Type</th>
-                <th className="px-4 py-3 text-left border border-gray-300">Current Stock (kg)</th>
+                <th className="px-4 py-3 text-left border border-gray-300">Current Stock in (kg)</th>
+                   <th className="px-4 py-3 text-left border border-gray-300">Current Stock in  (MT)</th>
               </tr>
             </thead>
             <tbody>
@@ -897,6 +908,7 @@ useEffect(() => {
                   <tr key={row.rm_name} className="hover:bg-gray-50">
                     <td className="px-4 py-3 border border-gray-300">{row.rm_name}</td>
                     <td className="px-4 py-3 border border-gray-300 font-medium">{Number(row.closing_stock || 0).toFixed(2)}</td>
+                    <td className="px-4 py-3 border border-gray-300 font-medium">{formatMt(row.closing_stock)}</td>
                   </tr>
                 ))
               )}

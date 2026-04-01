@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..models.plc import MachineState
 from ..models.production import ProductionBatch
-from .stock import add_feed_produced
+from .stock import add_feed_produced, rebuild_rm_stock_ledger
 
 
 RUN_STATUS_PENDING = "pending"
@@ -69,7 +69,12 @@ def try_post_batch_stock(db: Session, *, batch: ProductionBatch, client_id: int)
     return True
 
 
-def sync_active_batch_progress(db: Session, *, machine_state: MachineState) -> ProductionBatch | None:
+def sync_active_batch_progress(
+    db: Session,
+    *,
+    machine_state: MachineState,
+    client_id: int = 1,
+) -> ProductionBatch | None:
     """
     Update the active batch counter according to elapsed duration.
     Auto-completes and stops machine when planned count is reached.
@@ -79,7 +84,6 @@ def sync_active_batch_progress(db: Session, *, machine_state: MachineState) -> P
 
     batch = db.get(ProductionBatch, machine_state.active_batch_id)
     if not batch:
-        machine_state.is_running = False
         machine_state.active_batch_id = None
         machine_state.updated_at = datetime.utcnow()
         return None
@@ -120,8 +124,9 @@ def sync_active_batch_progress(db: Session, *, machine_state: MachineState) -> P
         batch.hmi_completed_count = total_count
         batch.hmi_status = RUN_STATUS_COMPLETED
         batch.hmi_completed_at = now
-        machine_state.is_running = False
         machine_state.active_batch_id = None
         machine_state.updated_at = now
+        # Finalized by PLC/runtime progression: recalculate RM ledger now.
+        rebuild_rm_stock_ledger(db=db, client_id=client_id)
 
     return batch

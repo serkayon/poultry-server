@@ -1,4 +1,4 @@
-import re
+﻿import re
 from datetime import datetime, timedelta
 
 from ..fastapi_compat import Blueprint, Response, jsonify, request
@@ -11,6 +11,7 @@ from ..common import (
     json_body,
     parse_datetime,
     parse_float,
+    resolve_period_range,
     required,
     serialize_batch,
     serialize_batch_material,
@@ -23,6 +24,7 @@ from ...services.plc_simulator import ensure_plc_live_data, get_or_create_machin
 from ...services.production_runtime import (
     RUN_STATUS_COMPLETED,
     RUN_STATUS_PENDING,
+    RUN_STATUS_RUNNING,
     RUN_STATUS_STOPPED,
     normalize_batch_count,
     sync_active_batch_progress,
@@ -33,6 +35,7 @@ from ...services.stock import (
     add_rm_consumption,
     calculate_rm_consumption_quantity,
     rebuild_rm_stock_ledger,
+    resolve_effective_batch_run_count,
     _latest_rm_closing,
     _start_of_day,
 )
@@ -213,6 +216,57 @@ def _suggest_next_hmi_batch_no(db) -> str:
     return f"BATCH{max_sequence + 1:05d}"
 
 
+def _normalize_filter_token(raw_value: str | None) -> str | None:
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    if value.lower() in {"all", "any", "*", "none", "null"}:
+        return None
+    return value
+
+
+def _parse_hmi_recipe_id(raw_value: object) -> int:
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("recipe_id must be an integer") from exc
+    if value <= 0:
+        raise ValueError("recipe_id must be greater than 0")
+    return value
+
+
+def _resolve_hmi_recipe_identity(db, recipe_id: int) -> tuple[Recipe | None, str]:
+    """
+    Resolve HMI recipe selection.
+    If recipe master row is missing, still allow batch start using a stable
+    fallback product name so HMI remains single-direction and resilient.
+    """
+    recipe = db.get(Recipe, recipe_id)
+    if recipe is not None:
+        recipe_name = str(recipe.name or "").strip()
+        return recipe, (recipe_name or f"Recipe {recipe_id}")
+    return None, f"Recipe {recipe_id}"
+
+
+def _collect_recipe_material_payload(recipe: Recipe | None) -> list[dict]:
+    if recipe is None:
+        return []
+
+    rows: list[dict] = []
+    for material in (recipe.materials or []):
+        rm_name = str(material.rm_name or "").strip()
+        if not rm_name:
+            continue
+        try:
+            qty = float(material.quantity)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+        rows.append({"rm_name": rm_name, "quantity": qty})
+    return rows
+
+
 @production_bp.get("/hmi/batch-no/suggest")
 def suggest_hmi_batch_no():
     with db_session() as db:
@@ -266,6 +320,91 @@ def list_batches():
                 )
             )
     return jsonify(out)
+
+
+@production_bp.get("/batches/filtered/<period>/<path:product_name>")
+def list_batches_by_period(period: str, product_name: str):
+    try:
+        from_date, to_date = resolve_period_range(
+            period,
+            from_date_raw=request.args.get("from_date"),
+            to_date_raw=request.args.get("to_date"),
+        )
+    except ValueError as exc:
+        return error(str(exc))
+    normalized_product_name = _normalize_filter_token(product_name)
+
+    with db_session() as db:
+        machine_state = get_or_create_machine_state(db)
+        synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
+        if synced_batch:
+            try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
+        active_batch_id = machine_state.active_batch_id
+
+        query = select(ProductionBatch).where(ProductionBatch.client_id == DEFAULT_CLIENT_ID)
+        query = query.where(ProductionBatch.date >= from_date)
+        query = query.where(ProductionBatch.date <= to_date)
+        if normalized_product_name:
+            query = query.where(ProductionBatch.product_name == normalized_product_name)
+        query = query.order_by(ProductionBatch.date.desc())
+
+        batches = db.execute(query).scalars().all()
+        out = []
+        for batch in batches:
+            has_report = (
+                db.execute(select(ProductionReport).where(ProductionReport.batch_id == batch.id))
+                .scalars()
+                .one_or_none()
+                is not None
+            )
+            out.append(
+                serialize_batch(
+                    batch,
+                    has_report=has_report,
+                    is_active=batch.id == active_batch_id,
+                )
+            )
+    return jsonify(out)
+
+
+@production_bp.get("/batches/summary/<period>/<path:product_name>")
+def summarize_batches_by_period(period: str, product_name: str):
+    try:
+        from_date, to_date = resolve_period_range(
+            period,
+            from_date_raw=request.args.get("from_date"),
+            to_date_raw=request.args.get("to_date"),
+        )
+    except ValueError as exc:
+        return error(str(exc))
+    normalized_product_name = _normalize_filter_token(product_name)
+
+    with db_session() as db:
+        machine_state = get_or_create_machine_state(db)
+        synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
+        if synced_batch:
+            try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
+
+        query = select(ProductionBatch).where(ProductionBatch.client_id == DEFAULT_CLIENT_ID)
+        query = query.where(ProductionBatch.date >= from_date)
+        query = query.where(ProductionBatch.date <= to_date)
+        if normalized_product_name:
+            query = query.where(ProductionBatch.product_name == normalized_product_name)
+
+        rows = db.execute(query).scalars().all()
+        total_batches = len(rows)
+        total_production_kg = sum(float(row.output or 0) for row in rows)
+
+    return jsonify(
+        {
+            "period": str(period),
+            "product_name": normalized_product_name or "all",
+            "from_date": from_date.isoformat() + "Z",
+            "to_date": to_date.isoformat() + "Z",
+            "total_batches": total_batches,
+            "total_production_kg": total_production_kg,
+        }
+    )
 
 
 @production_bp.post("/batches")
@@ -437,39 +576,227 @@ def create_hmi_batch():
         batch_no_input = _parse_batch_no(payload.get("batch_no"))
         batch_count = _parse_hmi_batch_count(required(payload, "batch_count"))
         duration_seconds = _parse_hmi_duration(required(payload, "duration_per_count_seconds"))
+        recipe_id_raw = payload.get("recipe_id")
+        recipe_id = _parse_hmi_recipe_id(recipe_id_raw) if recipe_id_raw not in (None, "") else None
         date = parse_datetime(payload.get("date"), "date") or datetime.utcnow()
     except (ValueError, TypeError) as exc:
         return error(str(exc))
 
-    with db_session() as db:
-        batch_no = batch_no_input or _suggest_next_hmi_batch_no(db)
-        if _batch_no_exists(db, batch_no):
-            return error(
-                f"batch_no already exists. Try {_suggest_next_hmi_batch_no(db)}."
+    try:
+        with db_session() as db:
+            recipe = None
+            product_name = ""
+            if recipe_id is not None:
+                recipe, product_name = _resolve_hmi_recipe_identity(db, recipe_id)
+
+            batch_no = batch_no_input or _suggest_next_hmi_batch_no(db)
+            if _batch_no_exists(db, batch_no):
+                return error(
+                    f"batch_no already exists. Try {_suggest_next_hmi_batch_no(db)}."
+                )
+            batch = ProductionBatch(
+                client_id=DEFAULT_CLIENT_ID,
+                batch_no=batch_no,
+                date=date,
+                product_name=product_name,
+                batch_size=float(batch_count),
+                mop=None,
+                water=None,
+                num_bags=None,
+                weight_per_bag=None,
+                output=0,
+                recipe_id=recipe_id,
+                hmi_duration_seconds=duration_seconds,
+                hmi_completed_count=0,
+                hmi_status=RUN_STATUS_PENDING,
+                hmi_started_at=None,
+                hmi_completed_at=None,
+                stock_posted=False,
+                last_modified_at=datetime.utcnow(),
             )
-        batch = ProductionBatch(
-            client_id=DEFAULT_CLIENT_ID,
-            batch_no=batch_no,
-            date=date,
-            product_name="",
-            batch_size=float(batch_count),
-            mop=None,
-            water=None,
-            num_bags=None,
-            weight_per_bag=None,
-            output=0,
-            recipe_id=None,
-            hmi_duration_seconds=duration_seconds,
-            hmi_completed_count=0,
-            hmi_status=RUN_STATUS_PENDING,
-            hmi_started_at=None,
-            hmi_completed_at=None,
-            stock_posted=False,
-            last_modified_at=datetime.utcnow(),
+            db.add(batch)
+            db.flush()
+            material_rows = []
+            for material in _collect_recipe_material_payload(recipe):
+                row = ProductionBatchMaterial(
+                    batch_id=batch.id,
+                    rm_name=material["rm_name"],
+                    quantity=material["quantity"],
+                )
+                db.add(row)
+                material_rows.append(row)
+            db.flush()
+            response = serialize_batch(batch, has_report=False, is_active=False)
+            response["materials"] = [serialize_batch_material(row) for row in material_rows]
+            return jsonify(response)
+    except Exception as exc:
+        return error(f"Unable to create HMI batch: {str(exc)}", 500)
+
+
+@production_bp.post("/hmi/start-batch")
+def start_hmi_batch():
+    try:
+        payload = json_body()
+        batch_no_input = _parse_batch_no(payload.get("batch_no"))
+        batch_count = _parse_hmi_batch_count(required(payload, "batch_count"))
+        duration_seconds = _parse_hmi_duration(required(payload, "duration_per_count_seconds"))
+        recipe_id = _parse_hmi_recipe_id(required(payload, "recipe_id"))
+        date = parse_datetime(payload.get("date"), "date") or datetime.utcnow()
+    except (ValueError, TypeError) as exc:
+        return error(str(exc))
+
+    try:
+        with db_session() as db:
+            machine_state = get_or_create_machine_state(db)
+            sync_active_batch_progress(db, machine_state=machine_state)
+
+            if not machine_state.is_running:
+                return error("Process is OFF. Turn ON process before starting a batch.")
+            if machine_state.active_batch_id is not None:
+                return error("A batch is already running. Stop it before starting a new batch.")
+
+            recipe, product_name = _resolve_hmi_recipe_identity(db, recipe_id)
+
+            batch_no = batch_no_input or _suggest_next_hmi_batch_no(db)
+            if _batch_no_exists(db, batch_no):
+                return error(
+                    f"batch_no already exists. Try {_suggest_next_hmi_batch_no(db)}."
+                )
+
+            now = datetime.utcnow()
+            batch = ProductionBatch(
+                client_id=DEFAULT_CLIENT_ID,
+                batch_no=batch_no,
+                date=date,
+                product_name=product_name,
+                batch_size=float(batch_count),
+                mop=None,
+                water=None,
+                num_bags=None,
+                weight_per_bag=None,
+                output=0,
+                recipe_id=recipe_id,
+                hmi_duration_seconds=duration_seconds,
+                hmi_completed_count=0,
+                hmi_status=RUN_STATUS_RUNNING,
+                hmi_started_at=now,
+                hmi_completed_at=None,
+                stock_posted=False,
+                last_modified_at=now,
+            )
+            db.add(batch)
+            db.flush()
+
+            material_rows: list[ProductionBatchMaterial] = []
+            for material in _collect_recipe_material_payload(recipe):
+                row = ProductionBatchMaterial(
+                    batch_id=batch.id,
+                    rm_name=material["rm_name"],
+                    quantity=material["quantity"],
+                )
+                db.add(row)
+                material_rows.append(row)
+
+            machine_state.active_batch_id = batch.id
+            machine_state.updated_at = now
+            db.flush()
+
+            response = serialize_batch(batch, has_report=False, is_active=True)
+            response["materials"] = [serialize_batch_material(row) for row in material_rows]
+            return jsonify(response)
+    except Exception as exc:
+        return error(f"Unable to start HMI batch: {str(exc)}", 500)
+
+
+@production_bp.post("/hmi/stop-active-batch")
+def stop_hmi_active_batch():
+    with db_session() as db:
+        machine_state = get_or_create_machine_state(db)
+        sync_active_batch_progress(db, machine_state=machine_state)
+
+        if machine_state.active_batch_id is None:
+            return error("No active batch is running.")
+
+        batch = db.get(ProductionBatch, machine_state.active_batch_id)
+        if batch is None:
+            machine_state.active_batch_id = None
+            machine_state.updated_at = datetime.utcnow()
+            return error("Active batch not found.", 404)
+
+        now = datetime.utcnow()
+        if batch.hmi_started_at is None:
+            batch.hmi_started_at = now
+        if (batch.hmi_status or "").lower() != RUN_STATUS_COMPLETED:
+            batch.hmi_status = RUN_STATUS_STOPPED
+            batch.hmi_completed_at = now
+            batch.last_modified_at = now
+        machine_state.active_batch_id = None
+        machine_state.updated_at = now
+
+        has_report = (
+            db.execute(select(ProductionReport).where(ProductionReport.batch_id == batch.id))
+            .scalars()
+            .one_or_none()
+            is not None
         )
-        db.add(batch)
+        return jsonify(serialize_batch(batch, has_report=has_report, is_active=False))
+
+
+@production_bp.post("/batches/<int:batch_id>/mark-complete")
+def mark_batch_complete(batch_id: int):
+    with db_session() as db:
+        machine_state = get_or_create_machine_state(db)
+        sync_active_batch_progress(db, machine_state=machine_state)
+
+        batch = (
+            db.execute(
+                select(ProductionBatch).where(
+                    ProductionBatch.id == batch_id,
+                    ProductionBatch.client_id == DEFAULT_CLIENT_ID,
+                )
+            )
+            .scalars()
+            .one_or_none()
+        )
+        if not batch:
+            return error("Batch not found", 404)
+
+        if machine_state.active_batch_id == batch.id:
+            return error("Active running batch cannot be marked complete. Stop it first.")
+
+        status = (batch.hmi_status or "").strip().lower()
+        if status != RUN_STATUS_COMPLETED:
+            now = datetime.utcnow()
+            planned_count = normalize_batch_count(batch.batch_size)
+            completed_count = max(0, int(batch.hmi_completed_count or 0))
+            if planned_count > 0:
+                completed_count = min(completed_count, planned_count)
+            batch.hmi_completed_count = completed_count
+            if batch.hmi_started_at is None:
+                batch.hmi_started_at = now
+            if batch.hmi_completed_at is None:
+                batch.hmi_completed_at = now
+            batch.hmi_status = RUN_STATUS_COMPLETED
+            batch.last_modified_at = now
+
+        rebuild_rm_stock_ledger(db=db, client_id=DEFAULT_CLIENT_ID)
+        try_post_batch_stock(db, batch=batch, client_id=DEFAULT_CLIENT_ID)
+        has_report = (
+            db.execute(select(ProductionReport).where(ProductionReport.batch_id == batch.id))
+            .scalars()
+            .one_or_none()
+            is not None
+        )
         db.flush()
-        return jsonify(serialize_batch(batch, has_report=False, is_active=False))
+        return jsonify(
+            {
+                "batch": serialize_batch(
+                    batch,
+                    has_report=has_report,
+                    is_active=batch.id == machine_state.active_batch_id,
+                )
+            }
+        )
 
 
 @production_bp.get("/batches/<int:batch_id>")
@@ -796,7 +1123,11 @@ def consumption_report():
 
         rows: list[dict] = []
         for batch in batches:
-            total_batch = float(batch.batch_size or 0)
+            total_batch = resolve_effective_batch_run_count(
+                batch_size=batch.batch_size,
+                hmi_completed_count=batch.hmi_completed_count,
+                hmi_status=batch.hmi_status,
+            )
             batch_rows = (
                 db.execute(
                     select(ProductionBatchMaterial)
@@ -928,7 +1259,7 @@ def download_production():
         mimetype="application/pdf",
         headers={"Content-Disposition": "attachment; filename=production_report.pdf"},
     )
-# 🔥 DOWNLOAD SINGLE BATCH REPORT
+# ðŸ”¥ DOWNLOAD SINGLE BATCH REPORT
 @production_bp.get("/<int:batch_id>/download")
 def download_single_batch(batch_id: int):
     file_format = request.args.get("format", "pdf").lower()
@@ -1083,7 +1414,11 @@ def download_batch_consumption_report(batch_id: int):
             .all()
         )
 
-    total_batch = float(batch.batch_size or 0)
+    total_batch = resolve_effective_batch_run_count(
+        batch_size=batch.batch_size,
+        hmi_completed_count=batch.hmi_completed_count,
+        hmi_status=batch.hmi_status,
+    )
     consumption_rows: list[tuple] = []
     total_weight_per_batch = 0.0
     total_weight = 0.0
@@ -1152,3 +1487,5 @@ def download_batch_consumption_report(batch_id: int):
         mimetype="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}.pdf"},
     )
+
+

@@ -10,16 +10,27 @@ from ..common import (
     json_body,
     parse_datetime,
     parse_float,
+    resolve_period_range,
     required,
     dt,
 )
 from ...models.config import ProductType
 from ...models.dispatch import DispatchEntry, DispatchProduct
+from ...models.stock import FeedStock
 from ...services.stock import add_feed_dispatched, rebuild_feed_stock_ledger
 from ...utils.export import export_table_to_csv, export_table_to_excel, export_table_to_pdf
 from ...utils.invoice import generate_invoice_pdf
 
 dispatch_bp = Blueprint("dispatch", __name__, url_prefix="/api/dispatch")
+
+
+def _normalize_filter_token(raw_value: str | None) -> str | None:
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    if value.lower() in {"all", "any", "*", "none", "null"}:
+        return None
+    return value
 
 
 def _serialize_dispatch(entry: DispatchEntry) -> dict:
@@ -74,6 +85,107 @@ def list_dispatch_entries():
         query = query.order_by(DispatchEntry.date.desc())
         rows = db.execute(query).scalars().all()
     return jsonify([_serialize_dispatch(row) for row in rows])
+
+
+@dispatch_bp.get("/filtered/<period>/<path:product_type>")
+def list_dispatch_entries_by_period(period: str, product_type: str):
+    try:
+        from_date, to_date = resolve_period_range(
+            period,
+            from_date_raw=request.args.get("from_date"),
+            to_date_raw=request.args.get("to_date"),
+        )
+    except ValueError as exc:
+        return error(str(exc))
+    normalized_product_type = _normalize_filter_token(product_type)
+    party_name = request.args.get("party_name")
+
+    with db_session() as db:
+        query = (
+            select(DispatchEntry)
+            .options(selectinload(DispatchEntry.products))
+            .where(DispatchEntry.client_id == DEFAULT_CLIENT_ID)
+        )
+        query = query.where(DispatchEntry.date >= from_date)
+        query = query.where(DispatchEntry.date <= to_date)
+        if normalized_product_type:
+            query = (
+                query.join(DispatchProduct)
+                .where(DispatchProduct.product_type == normalized_product_type)
+                .distinct()
+            )
+        if party_name:
+            query = query.where(DispatchEntry.party_name.ilike(f"%{party_name}%"))
+        query = query.order_by(DispatchEntry.date.desc())
+        rows = db.execute(query).scalars().all()
+    return jsonify([_serialize_dispatch(row) for row in rows])
+
+
+@dispatch_bp.get("/summary/<period>/<path:product_type>")
+def summarize_dispatch_by_period(period: str, product_type: str):
+    try:
+        from_date, to_date = resolve_period_range(
+            period,
+            from_date_raw=request.args.get("from_date"),
+            to_date_raw=request.args.get("to_date"),
+        )
+    except ValueError as exc:
+        return error(str(exc))
+    normalized_product_type = _normalize_filter_token(product_type)
+
+    with db_session() as db:
+        dispatch_query = (
+            select(DispatchEntry)
+            .options(selectinload(DispatchEntry.products))
+            .where(
+                DispatchEntry.client_id == DEFAULT_CLIENT_ID,
+                DispatchEntry.date >= from_date,
+                DispatchEntry.date <= to_date,
+            )
+        )
+        if normalized_product_type:
+            dispatch_query = (
+                dispatch_query.join(DispatchProduct)
+                .where(DispatchProduct.product_type == normalized_product_type)
+                .distinct()
+            )
+        dispatch_rows = db.execute(dispatch_query).scalars().all()
+
+        if normalized_product_type:
+            total_dispatched_kg = sum(
+                sum(
+                    float(p.total_weight or 0)
+                    for p in (row.products or [])
+                    if (p.product_type or "").strip() == normalized_product_type
+                )
+                for row in dispatch_rows
+            )
+        else:
+            total_dispatched_kg = sum(
+                sum(float(p.total_weight or 0) for p in (row.products or []))
+                for row in dispatch_rows
+            )
+
+        feed_query = select(FeedStock).where(
+            FeedStock.client_id == DEFAULT_CLIENT_ID,
+            FeedStock.date >= from_date,
+            FeedStock.date <= to_date,
+        )
+        if normalized_product_type:
+            feed_query = feed_query.where(FeedStock.feed_type == normalized_product_type)
+        feed_rows = db.execute(feed_query).scalars().all()
+        total_finished_goods_kg = sum(float(row.produced or 0) for row in feed_rows)
+
+    return jsonify(
+        {
+            "period": str(period),
+            "product_type": normalized_product_type or "all",
+            "from_date": from_date.isoformat() + "Z",
+            "to_date": to_date.isoformat() + "Z",
+            "total_finished_goods_kg": total_finished_goods_kg,
+            "total_dispatched_kg": total_dispatched_kg,
+        }
+    )
 
 
 def _parse_dispatch_products(products: object) -> list[dict]:

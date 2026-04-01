@@ -96,6 +96,10 @@ const initialReportForm = (batch) => ({
 
 export default function Production() {
   const [batches, setBatches] = useState([])
+  const [currentMonthSummary, setCurrentMonthSummary] = useState({
+    total_batches: 0,
+    total_production_kg: 0,
+  })
   const [productTypes, setProductTypes] = useState([])
   const [recipes, setRecipes] = useState([])
   const [selectedBatch, setSelectedBatch] = useState(null)
@@ -131,14 +135,26 @@ const consumptionRef = useRef(null);
 const [page, setPage] = useState(1)
 const pageSize = 5
 const [successMsg, setSuccessMsg] = useState('')
+const [markCompleteLoading, setMarkCompleteLoading] = useState(false)
 
 
   // const loadBatches = () => {
   //   productionApi.listBatches({ date: today }).then(({ data }) => setBatches(data || [])).catch(() => setBatches([]))
   // }
-
+const [periodPage, setPeriodPage] = useState(1)
+const periodPageSize = 6
 const loadBatches = () => {
-  productionApi.listBatches()
+  const period = dateRangeType
+  const productName = productFilter || 'all'
+  const params = {}
+  if (period === 'custom') {
+    const fromDateTime = toApiDateTimeFromDateInput(normalizedFromDate)
+    const toDateTime = toApiDateTimeFromDateInput(normalizedToDate, true)
+    if (fromDateTime) params.from_date = fromDateTime
+    if (toDateTime) params.to_date = toDateTime
+  }
+
+  productionApi.listBatchesByPeriod(period, productName, params)
     .then(({ data }) => {
       const sorted = (data || []).sort(
         (a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id
@@ -146,6 +162,22 @@ const loadBatches = () => {
       setBatches(sorted)
     })
     .catch(() => setBatches([]))
+}
+
+const loadCurrentMonthSummary = () => {
+  productionApi.summaryByPeriod('this_month', 'all')
+    .then(({ data }) => {
+      setCurrentMonthSummary({
+        total_batches: Number(data?.total_batches || 0),
+        total_production_kg: Number(data?.total_production_kg || 0),
+      })
+    })
+    .catch(() =>
+      setCurrentMonthSummary({
+        total_batches: 0,
+        total_production_kg: 0,
+      })
+    )
 }
 
 const loadAvailableRawMaterialStock = () => {
@@ -185,13 +217,8 @@ const loadAvailableRawMaterialStock = () => {
 
 const normalizedFromDate = fromDate && toDate && fromDate > toDate ? toDate : fromDate
 const normalizedToDate = fromDate && toDate && fromDate > toDate ? fromDate : toDate
-const currentMonthPrefix = todayDateInputIST().slice(0, 7)
-const currentMonthProductionKg = batches.reduce((sum, batch) => {
-  const batchDate = toDateInputIST(batch?.date, '')
-  if (!batchDate.startsWith(currentMonthPrefix)) return sum
-  const output = Number(batch?.output || 0)
-  return sum + (Number.isFinite(output) ? output : 0)
-}, 0)
+const currentMonthProductionKg = Number(currentMonthSummary.total_production_kg || 0)
+const currentMonthBatchCount = Number(currentMonthSummary.total_batches || 0)
 const currentMonthProductionMt = currentMonthProductionKg / 1000
 const currentMonthLabel = new Intl.DateTimeFormat('en-IN', {
   month: 'long',
@@ -204,13 +231,9 @@ const currentMonthProductionDisplay = currentMonthProductionMt.toLocaleString('e
 })
 
 const filteredBatches = batches.filter(b => {
-  const batchDate = toDateInputIST(b.date, "")
   const searchText = search.toLowerCase()
 
   return (
-    (productFilter ? b.product_name === productFilter : true) &&
-    (normalizedFromDate ? batchDate >= normalizedFromDate : true) &&
-    (normalizedToDate ? batchDate <= normalizedToDate : true) &&
     (
       b.product_name?.toLowerCase().includes(searchText) ||
       String(b.batch_no || b.id).toLowerCase().includes(searchText) ||
@@ -242,6 +265,10 @@ useEffect(() => {
 
 useEffect(() => {
   loadBatches()
+}, [dateRangeType, normalizedFromDate, normalizedToDate, productFilter])
+
+useEffect(() => {
+  loadCurrentMonthSummary()
 }, [])
 
 useEffect(() => {
@@ -265,14 +292,20 @@ const paginatedBatches = filteredBatches.slice(
   (page - 1) * pageSize,
   page * pageSize
 )
-const periodBatches = batches.filter((batch) => {
-  const batchDate = toDateInputIST(batch?.date, '')
-  return (
-    (productFilter ? batch.product_name === productFilter : true) &&
-    (normalizedFromDate ? batchDate >= normalizedFromDate : true) &&
-    (normalizedToDate ? batchDate <= normalizedToDate : true)
-  )
-})
+const periodBatches = batches
+
+const totalPeriodPages = Math.ceil(periodBatches.length / periodPageSize)
+
+const paginatedPeriodBatches = periodBatches.slice(
+  (periodPage - 1) * periodPageSize,
+  periodPage * periodPageSize
+)
+
+useEffect(() => {
+  setPeriodPage(1)
+}, [fromDate, toDate, productFilter, dateRangeType])
+
+
 const periodBatchLabel = (
   dateRangeType === 'today'
     ? 'today'
@@ -313,7 +346,16 @@ useEffect(() => {
   const report = batchDetail?.report
   const chemicalChartData = report ? NUTRITION_FIELDS.filter((k) => report[k] != null).map((k) => ({ name: k.replace('_', ' '), value: Number(report[k]) })) : []
   const physicalChartData = report ? PHYSICAL_FIELDS.filter((k) => report[k] != null).map((k) => ({ name: k.replace(/_/g, ' '), value: Number(report[k]) })) : []
-  const selectedBatchSize = Number(batchDetail?.batch?.batch_size || 0)
+  const selectedPlannedBatchCount = Number(batchDetail?.batch?.batch_size || 0)
+  const selectedCompletedBatchCount = Number(batchDetail?.batch?.completed_count || 0)
+  const selectedRunStatus = String(batchDetail?.batch?.run_status || "").toLowerCase()
+  const selectedBatchSize = (
+    Number.isFinite(selectedCompletedBatchCount) && selectedCompletedBatchCount > 0
+      ? selectedCompletedBatchCount
+      : selectedRunStatus === "completed"
+      ? selectedPlannedBatchCount
+      : 0
+  )
   const selectedConsumptionRows = Array.isArray(batchDetail?.materials)
     ? batchDetail.materials.map((material) => {
         const weightPerBatch = Number(material.quantity || 0)
@@ -337,6 +379,9 @@ useEffect(() => {
   )
   const batchRunStatus = (batchDetail?.batch?.run_status || selectedBatch?.run_status || '').toLowerCase()
   const canEditBagOutput = reportModalMode !== 'edit' || batchRunStatus === 'completed'
+  const canMarkBatchComplete =
+    reportModalMode === 'edit' &&
+    (batchRunStatus === 'stopped' || batchRunStatus === 'pending')
   const reportModalBatch = batchDetail?.batch || selectedBatch || null
   const reportModalEntryDate = reportModalBatch?.date || null
   const reportModalLastModified = reportModalBatch?.last_modified_at || reportModalBatch?.created_at || null
@@ -427,6 +472,37 @@ useEffect(() => {
       setReportMaterials(hydrateReportMaterials(null, batch?.product_name))
     }
     setShowReport(true)
+  }
+
+  const handleMarkBatchComplete = async () => {
+    const batchId = reportModalBatch?.id || selectedBatch?.id || reportForm.batch_id
+    if (!batchId) {
+      setReportError('Batch not selected.')
+      return
+    }
+
+    setReportError('')
+    setMarkCompleteLoading(true)
+    try {
+      const { data } = await productionApi.markBatchComplete(batchId)
+      const updatedBatch = data?.batch || null
+      if (updatedBatch) {
+        setSelectedBatch(updatedBatch)
+        setBatchDetail((prev) => (
+          prev && prev.batch
+            ? { ...prev, batch: { ...prev.batch, ...updatedBatch } }
+            : prev
+        ))
+      }
+      await loadBatches()
+      loadCurrentMonthSummary()
+      setSuccessMsg('Batch marked as complete. You can now enter bag details.')
+    } catch (err) {
+      const detail = err?.response?.data?.detail || 'Unable to mark batch as complete.'
+      setReportError(detail)
+    } finally {
+      setMarkCompleteLoading(false)
+    }
   }
 
   const handleReportProductChange = (value) => {
@@ -563,6 +639,7 @@ useEffect(() => {
       setBatchMaterials([{ ...EMPTY_MATERIAL_ROW }])
       setBatchError('')
       loadBatches()
+      loadCurrentMonthSummary()
     } catch (err) {
       const detail = err?.response?.data?.detail || 'Unable to create batch.'
       setBatchError(detail)
@@ -683,6 +760,7 @@ useEffect(() => {
         setReportError('')
         productionApi.getBatch(batchId).then(({ data }) => setBatchDetail(data)).catch(() => {})
         loadBatches()
+        loadCurrentMonthSummary()
         setSuccessMsg('Batch details updated successfully.')
       } catch (err) {
         const detail = err?.response?.data?.detail || 'Unable to update batch details.'
@@ -712,6 +790,7 @@ useEffect(() => {
       setReportError('')
       productionApi.getBatch(batchId).then(({ data }) => setBatchDetail(data)).catch(() => {})
       loadBatches()
+      loadCurrentMonthSummary()
       setSuccessMsg('Report submitted successfully.')
     } catch (err) {
       const detail = err?.response?.data?.detail || 'Unable to submit report.'
@@ -799,7 +878,7 @@ const getRecipeMaterials = (productName) => {
         Total Production
       </p>
       <p className="text-3xl font-bold text-[#7a2e0e]">
-        {currentMonthProductionDisplay} <span className="text-base font-medium">MT</span>
+        {Number(currentMonthProductionDisplay)} <span className="text-base font-medium">MT</span>
       </p>
     {/* </div> */}
   </div>
@@ -831,7 +910,7 @@ const getRecipeMaterials = (productName) => {
         Total Batch
       </p>
       <p className="text-3xl font-bold text-[#7a2e0e]">
-        10<span className="text-base font-medium"> batches</span>
+        {currentMonthBatchCount}<span className="text-base font-medium"> batches</span>
       </p>
     {/* </div> */}
   </div>
@@ -1063,12 +1142,20 @@ disabled
 
           <table className="w-full text-left text-sm">
             <thead>
+                <tr className="bg-[#2F5D5D] text-white text-center">
+    <th colSpan={6} className="px-4 py-2 border">
+      Machine Data
+    </th>
+    <th colSpan={5} className="px-4 py-2 border">
+      Manual Entry Data
+    </th>
+  </tr>
               <tr className="bg-[#2F5D5D] text-white">
                 <th className="px-4 py-3 border">Date</th>
                 <th className="px-4 py-3 text-left border border-gray-300">Batch #</th>
                 <th className="px-4 py-3 text-left border border-gray-300">Product</th>
-                <th className="px-4 py-3 text-left border border-gray-300">Batch Count</th>
-                <th className="px-4 py-3 text-left border border-gray-300">Progress</th>
+                <th className="px-4 py-3 text-left border border-gray-300">Batch Count Assigned</th>
+                <th className="px-4 py-3 text-left border border-gray-300">Batch Count Utilized</th>
                 <th className="px-4 py-3 text-left border border-gray-300">Status</th>
                 <th className="px-4 py-3 text-left border border-gray-300">No. of Bags</th>
                 <th className="px-4 py-3 text-left border border-gray-300">Weight/Bag</th>
@@ -1093,16 +1180,16 @@ disabled
       {b.product_name || "—"}
     </span>
 
-    {getRecipeMaterials(b.product_name) && (
+    {/* {getRecipeMaterials(b.product_name) && (
       <span className="text-xs text-gray-500 mt-1">
         {getRecipeMaterials(b.product_name)}
       </span>
-    )}
+    )} */}
 
   </div>
 </td>
                   <td className="px-4 py-3 border border-gray-300">{b.batch_size}</td>
-                  <td className="px-4 py-3 border border-gray-300">{b.progress_label || '—'}</td>
+                  <td className="px-4 py-3 border border-gray-300">{b.completed_count || '—'}</td>
                   <td className="px-4 py-3 border border-gray-300 capitalize">{b.run_status || 'pending'}</td>
                   <td className="px-4 py-3 border border-gray-300">{b.num_bags ?? '—'}</td>
                   <td className="px-4 py-3 border border-gray-300">{b.weight_per_bag ?? '—'}</td>
@@ -1230,7 +1317,7 @@ disabled
           <h2 className="text-sm font-medium text-gray-900 mb-3">Batches for {periodBatchLabel} (select to view)</h2>
           <div className="space-y-2">
             {periodBatches.length === 0 && <p className="text-gray-900 text-sm">No batches for selected period.</p>}
-            {periodBatches.map((b) => (
+            {paginatedPeriodBatches.map((b) => (
               <button
                 key={b.id}
                 onClick={() => selectBatch(b)}
@@ -1285,6 +1372,52 @@ disabled
               </button>
             ))}
           </div>
+
+          <div className="flex flex-col sm:flex-row items-center justify-between mt-3 gap-2">
+
+  <span className="text-xs text-gray-500">
+    Page {periodPage} of {totalPeriodPages || 1}
+  </span>
+
+  <div className="flex flex-wrap gap-1 justify-center">
+
+    {/* Prev */}
+    <button
+      disabled={periodPage === 1}
+      onClick={() => setPeriodPage(p => p - 1)}
+      className="px-2 py-1 text-xs border rounded disabled:opacity-40"
+    >
+      ◀
+    </button>
+
+    {/* Page Numbers */}
+    {Array.from({ length: totalPeriodPages }, (_, i) => i + 1)
+      .slice(Math.max(0, periodPage - 2), periodPage + 1)
+      .map((p) => (
+        <button
+          key={p}
+          onClick={() => setPeriodPage(p)}
+          className={`px-2 py-1 text-xs border rounded ${
+            periodPage === p
+              ? 'bg-[#245658] text-white'
+              : 'bg-white'
+          }`}
+        >
+          {p}
+        </button>
+      ))}
+
+    {/* Next */}
+    <button
+      disabled={periodPage === totalPeriodPages}
+      onClick={() => setPeriodPage(p => p + 1)}
+      className="px-2 py-1 text-xs border rounded disabled:opacity-40"
+    >
+      ▶
+    </button>
+
+  </div>
+</div>
         </div>
          </div>
         <div className="lg:col-span-2">
@@ -1299,15 +1432,15 @@ disabled
                 </div>
                 <div>
                   <p className="text-xs text-gray-500">Product</p>
-                  <p className="text-gray-900 font-medium">{batchDetail.batch?.product_name}</p>
+                  <p className="text-gray-900 font-medium">{batchDetail.batch?.product_name|| "—"}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500">Batch Count</p>
+                  <p className="text-xs text-gray-500">Batch Count Assigned</p>
                   <p className="text-gray-900">{batchDetail.batch?.batch_size}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500">Count Progress</p>
-                  <p className="text-gray-900">{batchDetail.batch?.progress_label || '—'}</p>
+                  <p className="text-xs text-gray-500">Batch Count Utilized</p>
+                  <p className="text-gray-900">{batchDetail.batch?.completed_count || '—'}</p>
                 </div>
                 <div>
                   <p className="text-xs text-gray-500">Run Status</p>
@@ -1540,6 +1673,21 @@ disabled
           </p>
           {reportModalMode === 'edit' && (
           <div>
+            {canMarkBatchComplete && (
+              <div className="mb-3">
+                <button
+                  type="button"
+                  onClick={handleMarkBatchComplete}
+                  disabled={markCompleteLoading}
+                  className="px-3 py-2 rounded-lg bg-[#245658] text-white text-xs font-semibold disabled:opacity-60"
+                >
+                  {markCompleteLoading ? 'Marking...' : 'Mark As Complete'}
+                </button>
+                <p className="text-xs text-gray-600 mt-1">
+                  Current utilized count ({reportModalBatch?.completed_count ?? 0}) will be kept.
+                </p>
+              </div>
+            )}
             <div className="bg-gray-100 border border-gray-300 rounded-lg p-3 mb-3">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs font-semibold text-gray-700">Available Raw Materials</p>
@@ -1757,7 +1905,7 @@ disabled
             </div>
             {!canEditBagOutput && (
               <p className="text-xs text-amber-700 mt-2">
-                Bag count and weight can be entered only after batch count completion in HMI.
+                Mark this stopped/pending batch as complete, then enter bag count and weight.
               </p>
             )}
 </div>

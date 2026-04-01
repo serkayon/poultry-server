@@ -15,6 +15,7 @@ const client = axios.create({
   baseURL: apiBaseUrl,
   headers: { 'Content-Type': 'application/json' },
 })
+const encodePathParam = (value) => encodeURIComponent(String(value ?? ''))
 
 let backendReachable = true
 const backendStatusListeners = new Set()
@@ -134,7 +135,7 @@ export const auth = {
 
 export const plc = {
   latest: () => client.get('/plc/latest'),
-  history: (minutes = 60) => client.get('/plc/history', { params: { minutes } }),
+  history: (minutes = 60, params = {}) => client.get('/plc/history', { params: { minutes, ...params } }),
   machineStatus: () => client.get('/plc/machine/status'),
 }
 
@@ -146,6 +147,16 @@ export const rawMaterial = {
   updateType: (id, name) => client.put(`/raw-material/types/${id}`, null, { params: { name } }),
   deleteType: (id) => client.delete(`/raw-material/types/${id}`),
   list: (params) => client.get('/raw-material', { params }),
+  listByPeriod: (period, rmType = 'all', params = {}) =>
+    client.get(
+      `/raw-material/filtered/${encodePathParam(period)}/${encodePathParam(rmType)}`,
+      { params }
+    ),
+  summaryByPeriod: (period, rmType = 'all', params = {}) =>
+    client.get(
+      `/raw-material/summary/${encodePathParam(period)}/${encodePathParam(rmType)}`,
+      { params }
+    ),
   create: (data) => client.post('/raw-material', data),
   update: (id, data) => client.put(`/raw-material/${id}`, data),
   downloadEntry: (id, format = 'pdf') => client.get(`/raw-material/${id}/download`, { params: { format }, responseType: 'blob' }),
@@ -160,6 +171,16 @@ export const rawMaterial = {
 
 export const dispatchApi = {
   list: (params) => client.get('/dispatch', { params }),
+  listByPeriod: (period, productType = 'all', params = {}) =>
+    client.get(
+      `/dispatch/filtered/${encodePathParam(period)}/${encodePathParam(productType)}`,
+      { params }
+    ),
+  summaryByPeriod: (period, productType = 'all', params = {}) =>
+    client.get(
+      `/dispatch/summary/${encodePathParam(period)}/${encodePathParam(productType)}`,
+      { params }
+    ),
   create: (data) => client.post('/dispatch', data),
   update: (id, data) => client.put(`/dispatch/${id}`, data),
   downloadEntry: (id, format = 'pdf') => client.get(`/dispatch/${id}/download`, { params: { format }, responseType: 'blob' }),
@@ -173,9 +194,20 @@ export const dispatchApi = {
 
 export const productionApi = {
   listBatches: (params) => client.get('/production/batches', { params }),
+  listBatchesByPeriod: (period, productName = 'all', params = {}) =>
+    client.get(
+      `/production/batches/filtered/${encodePathParam(period)}/${encodePathParam(productName)}`,
+      { params }
+    ),
+  summaryByPeriod: (period, productName = 'all', params = {}) =>
+    client.get(
+      `/production/batches/summary/${encodePathParam(period)}/${encodePathParam(productName)}`,
+      { params }
+    ),
   getBatch: (id) => client.get(`/production/batches/${id}`),
   createBatch: (data) => client.post('/production/batches', data),
   updateBatchDetails: (id, data) => client.put(`/production/batches/${id}/details`, data),
+  markBatchComplete: (id) => client.post(`/production/batches/${id}/mark-complete`, {}),
   submitReport: (data) => client.post('/production/report', data),
   consumptionReport: (params) => client.get('/production/consumption', { params }),
   download: (format, params = {}) =>
@@ -223,7 +255,12 @@ export const productionApi = {
 // }
  export const stockApi = {
   rm: (params) => client.get('/stock/rm', { params }),
+  rmByPeriod: (period, params = {}) =>
+    client.get(`/stock/rm/filtered/${encodePathParam(period)}`, { params }),
+  rmSummary: () => client.get('/stock/rm/summary'),
   feed: (params) => client.get('/stock/feed', { params }),
+  feedByPeriod: (period, params = {}) =>
+    client.get(`/stock/feed/filtered/${encodePathParam(period)}`, { params }),
   feedSummary: () => client.get('/stock/feed/summary'),
 
   // ✅ Raw Material Report

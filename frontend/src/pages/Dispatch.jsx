@@ -29,10 +29,6 @@ function shiftDateInput(dateInput, daysOffset) {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
 }
 
-function toDateInputLocal(date) {
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
-}
-
 function toApiDateTimeFromDateInputIST(dateInput, endOfDay = false) {
   if (!DATE_ONLY_RE.test(String(dateInput || ""))) return null
   return `${dateInput}T${endOfDay ? "23:59:59" : "00:00:00"}+05:30`
@@ -118,12 +114,6 @@ export default function Dispatch() {
   const [filters, setFilters] = useState({ product_type: '' })
   const todayDate = todayDateInputIST()
   const monthAnchorDate = new Date(`${todayDate}T00:00:00`)
-  const currentMonthStart = toDateInputLocal(
-    new Date(monthAnchorDate.getFullYear(), monthAnchorDate.getMonth(), 1)
-  )
-  const currentMonthEnd = toDateInputLocal(
-    new Date(monthAnchorDate.getFullYear(), monthAnchorDate.getMonth() + 1, 0)
-  )
   const currentMonthLabel = new Intl.DateTimeFormat("en-IN", {
     timeZone: IST_TIME_ZONE,
     month: "long",
@@ -176,12 +166,15 @@ export default function Dispatch() {
   }, [search, filters.product_type, dateRangePreset, fromDate, toDate])
 
   const load = () => {
+    const period = dateRangePreset
+    const productType = filters.product_type || "all"
     const params = {}
-    if (effectiveFromDate) params.from_date = toApiDateTimeFromDateInputIST(effectiveFromDate)
-    if (effectiveToDate) params.to_date = toApiDateTimeFromDateInputIST(effectiveToDate, true)
-    if (filters.product_type) params.product_type = filters.product_type
+    if (period === "custom") {
+      if (effectiveFromDate) params.from_date = toApiDateTimeFromDateInputIST(effectiveFromDate)
+      if (effectiveToDate) params.to_date = toApiDateTimeFromDateInputIST(effectiveToDate, true)
+    }
 
-    dispatchApi.list(params)
+    dispatchApi.listByPeriod(period, productType, params)
       .then(({ data }) => {
         const sorted = (data || []).sort(
           (a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id
@@ -192,37 +185,13 @@ export default function Dispatch() {
   }
 
   const loadMonthlySummary = () => {
-    const monthRangeParams = {
-      from_date: toApiDateTimeFromDateInputIST(currentMonthStart),
-      to_date: toApiDateTimeFromDateInputIST(currentMonthEnd, true),
-    }
-
-    Promise.all([
-      stockApi.feed({ date: currentMonthStart }),
-      dispatchApi.list(monthRangeParams),
-    ])
-      .then(([feedRes, dispatchRes]) => {
-        const feedRows = Array.isArray(feedRes?.data) ? feedRes.data : []
-        const dispatchRows = Array.isArray(dispatchRes?.data) ? dispatchRes.data : []
-
-        const finishedGoodsKg = feedRows
-          .filter((row) => {
-            const dayKey = toDateInputIST(row?.date, "")
-            return dayKey >= currentMonthStart && dayKey <= currentMonthEnd
-          })
-          .reduce((sum, row) => sum + (Number(row?.produced) || 0), 0)
-
-        const dispatchedKg = dispatchRows.reduce((sum, row) => {
-          const directTotal = Number(row?.total_weight)
-          if (Number.isFinite(directTotal)) return sum + directTotal
-          const products = Array.isArray(row?.products) ? row.products : []
-          return (
-            sum +
-            products.reduce((acc, p) => acc + (Number(p?.total_weight) || 0), 0)
-          )
-        }, 0)
-
-        setMonthlySummary({ finishedGoodsKg, dispatchedKg })
+    dispatchApi
+      .summaryByPeriod("this_month", "all")
+      .then(({ data }) => {
+        setMonthlySummary({
+          finishedGoodsKg: Number(data?.total_finished_goods_kg || 0),
+          dispatchedKg: Number(data?.total_dispatched_kg || 0),
+        })
       })
       .catch(() => setMonthlySummary({ finishedGoodsKg: 0, dispatchedKg: 0 }))
   }
@@ -230,11 +199,11 @@ export default function Dispatch() {
   useEffect(() => {
     load()
     setCurrentPage(1)
-  }, [filters.product_type, effectiveFromDate, effectiveToDate])
+  }, [filters.product_type, dateRangePreset, effectiveFromDate, effectiveToDate])
 
   useEffect(() => {
     loadMonthlySummary()
-  }, [currentMonthStart, currentMonthEnd])
+  }, [])
 
   useEffect(() => {
     configApi.productTypes().then(({ data }) => setProductTypes(Array.isArray(data) ? data : [])).catch(() => setProductTypes([]))
@@ -539,7 +508,7 @@ export default function Dispatch() {
 
   const formatMt = (valueKg) => {
     const safeKg = Math.max(0, Number(valueKg) || 0)
-    return (safeKg / 1000).toFixed(3)
+    return Number((safeKg / 1000).toFixed(3))
   }
 
   const summaryCards = [

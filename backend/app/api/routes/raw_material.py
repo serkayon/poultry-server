@@ -10,6 +10,7 @@ from ..common import (
     json_body,
     parse_datetime,
     parse_float,
+    resolve_period_range,
     required,
     dt,
     serialize_raw_entry,
@@ -28,6 +29,15 @@ from ...utils.export import (
 )
 
 raw_material_bp = Blueprint("raw_material", __name__, url_prefix="/api/raw-material")
+
+
+def _normalize_filter_token(raw_value: str | None) -> str | None:
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    if value.lower() in {"all", "any", "*", "none", "null"}:
+        return None
+    return value
 
 
 def _serialize_lab_report(report: RawMaterialLabReport) -> dict:
@@ -235,6 +245,94 @@ def list_raw_material_entries():
             )
             out.append(serialize_raw_entry(entry, has_lab))
     return jsonify(out)
+
+
+@raw_material_bp.get("/filtered/<period>/<path:rm_type>")
+def list_raw_material_entries_by_period(period: str, rm_type: str):
+    try:
+        from_date, to_date = resolve_period_range(
+            period,
+            from_date_raw=request.args.get("from_date"),
+            to_date_raw=request.args.get("to_date"),
+        )
+    except ValueError as exc:
+        return error(str(exc))
+    normalized_rm_type = _normalize_filter_token(rm_type)
+
+    with db_session() as db:
+        query = select(RawMaterialEntry).where(RawMaterialEntry.client_id == DEFAULT_CLIENT_ID)
+        query = query.where(RawMaterialEntry.date >= from_date)
+        query = query.where(RawMaterialEntry.date <= to_date)
+        if normalized_rm_type:
+            query = query.where(RawMaterialEntry.rm_type == normalized_rm_type)
+        query = query.order_by(RawMaterialEntry.date.desc())
+
+        entries = db.execute(query).scalars().all()
+        out = []
+        for entry in entries:
+            has_lab = (
+                db.execute(
+                    select(RawMaterialLabReport).where(RawMaterialLabReport.entry_id == entry.id)
+                )
+                .scalars()
+                .one_or_none()
+                is not None
+            )
+            out.append(serialize_raw_entry(entry, has_lab))
+    return jsonify(out)
+
+
+@raw_material_bp.get("/summary/<period>/<path:rm_type>")
+def summarize_raw_material_by_period(period: str, rm_type: str):
+    try:
+        from_date, to_date = resolve_period_range(
+            period,
+            from_date_raw=request.args.get("from_date"),
+            to_date_raw=request.args.get("to_date"),
+        )
+    except ValueError as exc:
+        return error(str(exc))
+    normalized_rm_type = _normalize_filter_token(rm_type)
+
+    with db_session() as db:
+        entry_query = select(RawMaterialEntry).where(
+            RawMaterialEntry.client_id == DEFAULT_CLIENT_ID,
+            RawMaterialEntry.date >= from_date,
+            RawMaterialEntry.date <= to_date,
+        )
+        if normalized_rm_type:
+            entry_query = entry_query.where(RawMaterialEntry.rm_type == normalized_rm_type)
+        entry_rows = db.execute(entry_query).scalars().all()
+        total_received_kg = sum(float(row.total_weight or 0) for row in entry_rows)
+
+        stock_query = select(RMStockLedger).where(
+            RMStockLedger.client_id == DEFAULT_CLIENT_ID,
+            RMStockLedger.date >= from_date,
+            RMStockLedger.date <= to_date,
+        )
+        if normalized_rm_type:
+            stock_query = stock_query.where(RMStockLedger.rm_name == normalized_rm_type)
+        stock_query = stock_query.order_by(RMStockLedger.date.desc(), RMStockLedger.id.desc())
+        stock_rows = db.execute(stock_query).scalars().all()
+
+        latest_stock_by_name: dict[str, float] = {}
+        for row in stock_rows:
+            key = str(row.rm_name or "").strip()
+            if not key or key in latest_stock_by_name:
+                continue
+            latest_stock_by_name[key] = float(row.closing_stock or 0)
+        total_stock_kg = sum(latest_stock_by_name.values())
+
+    return jsonify(
+        {
+            "period": str(period),
+            "rm_type": normalized_rm_type or "all",
+            "from_date": from_date.isoformat() + "Z",
+            "to_date": to_date.isoformat() + "Z",
+            "total_received_kg": total_received_kg,
+            "total_stock_kg": total_stock_kg,
+        }
+    )
 
 
 @raw_material_bp.post("")

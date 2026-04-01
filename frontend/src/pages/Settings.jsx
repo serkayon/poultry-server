@@ -696,7 +696,12 @@ const handleClosePinModal = () => {
                 {recipes.map((recipe) => (
                   <div key={recipe.id} className="border border-slate-200 rounded-md p-3 bg-white">
                     <div className="flex items-start justify-between gap-2">
-                      <p className="font-medium text-slate-800">{recipe.name}</p>
+                      <div>
+                        <p className="font-medium text-slate-800">{recipe.name}</p>
+                        <p className="text-xs text-slate-500 mt-1">
+                          Recipe ID: {recipe.id ?? "—"}
+                        </p>
+                      </div>
                       <div className="flex flex-col items-end gap-2">
                         <p className="text-xs text-slate-500">
                           Last Modified: {formatDateTimeIST(recipe.last_modified_at || recipe.created_at)}
@@ -891,6 +896,9 @@ const handleClosePinModal = () => {
           <div className="space-y-4">
             <div className="bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
               <p className="text-sm font-semibold text-slate-800">{viewingRecipe.name}</p>
+              <p className="text-xs text-slate-500 mt-1">
+                Recipe ID: {viewingRecipe.id ?? "—"}
+              </p>
               <p className="text-xs text-slate-500 mt-1">
                 Last Modified: {formatDateTimeIST(viewingRecipe.last_modified_at || viewingRecipe.created_at)}
               </p>

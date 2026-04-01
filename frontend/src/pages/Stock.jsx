@@ -5,7 +5,6 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import {
   formatDateIST,
   toApiDateTimeFromDateInput,
-  toDateInputIST,
   todayDateInputIST,
 } from "../utils/datetime";
 
@@ -27,6 +26,8 @@ const shiftDateInput = (dateInput, days) => {
 export default function Stock() {
   const [rmStock, setRmStock] = useState([])
   const [feedStock, setFeedStock] = useState([])
+  const [rmSummaryStock, setRmSummaryStock] = useState([])
+  const [feedSummaryStock, setFeedSummaryStock] = useState([])
   const [rmTypes, setRmTypes] = useState([])
   const [rmRange, setRmRange] = useState('today')
   const [feedRange, setFeedRange] = useState('today')
@@ -36,9 +37,9 @@ export default function Stock() {
   const [feedToDate, setFeedToDate] = useState(todayDateInputIST())
 
   useEffect(() => {
-    stockApi.rm().then(({ data }) => setRmStock(data || [])).catch(() => setRmStock([]))
-    stockApi.feed().then(({ data }) => setFeedStock(data || [])).catch(() => setFeedStock([]))
     rawMaterial.listTypes().then(({ data }) => setRmTypes(data || [])).catch(() => setRmTypes([]))
+    stockApi.rmSummary().then(({ data }) => setRmSummaryStock(data || [])).catch(() => setRmSummaryStock([]))
+    stockApi.feedSummary().then(({ data }) => setFeedSummaryStock(data || [])).catch(() => setFeedSummaryStock([]))
   }, [])
 
   const formatQty = (value) => {
@@ -89,39 +90,18 @@ export default function Stock() {
     )
   }
 
-  const latestByType = (rows, keySelector) =>
-    rows.reduce((acc, row) => {
-      const key = keySelector(row)
-      if (!key) return acc
-
-      const rowTime = row.date ? new Date(row.date).getTime() : Number.NEGATIVE_INFINITY
-      const current = acc[key]
-      if (!current || rowTime > current.time) {
-        acc[key] = {
-          time: rowTime,
-          row,
-        }
-      }
-      return acc
-    }, {})
-
   const normalizeFeedType = (value) => String(value || '').trim()
   const normalizeBagWeight = (value) => {
     const num = Number(value)
     return Number.isFinite(num) && num > 0 ? num : null
   }
+  const formatMt = (valueKg) => {
+    const safeKg = Math.max(0, Number(valueKg) || 0)
+    return Number((safeKg / 1000).toFixed(3))
+  }
 
-  const latestFeedByType = latestByType(feedStock, (row) => {
-    const feedType = normalizeFeedType(row?.feed_type)
-    if (!feedType) return ''
-    const bagWeight = normalizeBagWeight(row?.bag_weight_kg)
-    return `${feedType}__${bagWeight == null ? 'na' : bagWeight}`
-  })
-  const latestRmByType = latestByType(rmStock, (row) => String(row?.rm_name || '').trim())
-
-  const feedAvailableStock = Object.values(latestFeedByType)
-    .reduce((acc, item) => {
-      const feedType = normalizeFeedType(item?.row?.feed_type)
+  const feedAvailableStock = Object.values(feedSummaryStock.reduce((acc, row) => {
+      const feedType = normalizeFeedType(row?.feed_type)
       if (!feedType) return acc
       if (!acc[feedType]) {
         acc[feedType] = {
@@ -130,15 +110,15 @@ export default function Stock() {
           bagStockByWeight: {},
         }
       }
-      const closingKg = Number(item?.row?.closing_stock) || 0
+      const closingKg = Number(row?.quantity) || 0
       acc[feedType].closing += closingKg
-      const bagWeight = normalizeBagWeight(item?.row?.bag_weight_kg)
+      const bagWeight = normalizeBagWeight(row?.bag_weight_kg)
       if (bagWeight != null) {
         const weightKey = formatQty(bagWeight)
         acc[feedType].bagStockByWeight[weightKey] = (acc[feedType].bagStockByWeight[weightKey] || 0) + closingKg
       }
       return acc
-    }, {})
+    }, {}))
   const feedAvailableStockRows = Object.values(feedAvailableStock)
     .map((row) => ({
       name: row.name,
@@ -147,15 +127,29 @@ export default function Stock() {
     }))
     .sort((a, b) => a.name.localeCompare(b.name))
 
-  const rmAvailableStock = (rmTypes.length ? rmTypes.map((item) => item.name) : Object.keys(latestRmByType))
+  const rmSummaryByName = (rmSummaryStock || []).reduce((acc, row) => {
+    const name = String(row?.rm_name || '').trim()
+    if (!name) return acc
+    acc[name] = Number(row?.quantity || 0)
+    return acc
+  }, {})
+
+  const rmAvailableStock = (rmTypes.length ? rmTypes.map((item) => item.name) : Object.keys(rmSummaryByName))
     .map((name) => ({
       name,
-      closing: Number(latestRmByType[name]?.row?.closing_stock) || 0,
+      closing: Number(rmSummaryByName[name]) || 0,
     }))
     .sort((a, b) => a.name.localeCompare(b.name))
 
   const feedChartData = feedAvailableStockRows.map(({ name, closing }) => ({ name, closing }))
   const rmChartData = rmAvailableStock.map(({ name, closing }) => ({ name, closing }))
+
+  const toApiPeriod = (rangeKey) => {
+    if (rangeKey === 'last_7_days') return 'last_7'
+    if (rangeKey === 'last_15_days') return 'last_15'
+    if (rangeKey === 'last_30_days') return 'last_30'
+    return rangeKey || 'today'
+  }
 
   const resolveRangeDates = (rangeKey, customFrom, customTo) => {
     const today = todayDateInputIST()
@@ -187,6 +181,44 @@ export default function Stock() {
     }
     return from <= to ? { from, to } : { from: to, to: from }
   }
+
+  const buildPeriodFetchParams = (rangeKey, customFrom, customTo) => {
+    if (toApiPeriod(rangeKey) !== 'custom') return {}
+
+    let { from, to } = resolveRangeDates(rangeKey, customFrom, customTo)
+    const today = todayDateInputIST()
+    if (!from && !to) {
+      from = today
+      to = today
+    } else if (!from) {
+      from = to
+    } else if (!to) {
+      to = from
+    }
+
+    const params = {}
+    const fromDate = toApiDateTimeFromDateInput(from)
+    const toDate = toApiDateTimeFromDateInput(to, true)
+    if (fromDate) params.from_date = fromDate
+    if (toDate) params.to_date = toDate
+    return params
+  }
+
+  useEffect(() => {
+    const period = toApiPeriod(rmRange)
+    stockApi
+      .rmByPeriod(period, buildPeriodFetchParams(rmRange, rmFromDate, rmToDate))
+      .then(({ data }) => setRmStock(Array.isArray(data) ? data : []))
+      .catch(() => setRmStock([]))
+  }, [rmRange, rmFromDate, rmToDate])
+
+  useEffect(() => {
+    const period = toApiPeriod(feedRange)
+    stockApi
+      .feedByPeriod(period, buildPeriodFetchParams(feedRange, feedFromDate, feedToDate))
+      .then(({ data }) => setFeedStock(Array.isArray(data) ? data : []))
+      .catch(() => setFeedStock([]))
+  }, [feedRange, feedFromDate, feedToDate])
 
   const buildDownloadRangeParams = (rangeKey, customFrom, customTo) => {
     const { from, to } = resolveRangeDates(rangeKey, customFrom, customTo)
@@ -240,24 +272,8 @@ export default function Stock() {
     })
   }
 
-  const inSelectedRange = (dateValue, rangeKey, customFrom, customTo) => {
-    const rowDate = toDateInputIST(dateValue, '')
-    if (!rowDate) return false
-    const { from, to } = resolveRangeDates(rangeKey, customFrom, customTo)
-    if (!from && !to) return true
-    if (!from) return rowDate <= to
-    if (!to) return rowDate >= from
-    return rowDate >= from && rowDate <= to
-  }
-
-  const filteredRmStock = rmStock.filter((row) => (
-    inSelectedRange(row?.date, rmRange, rmFromDate, rmToDate)
-  ))
-  const filteredFeedStock = feedStock.filter((row) => (
-    inSelectedRange(row?.date, feedRange, feedFromDate, feedToDate)
-  ))
-  const filteredFeedStockGrouped = Object.values(
-    filteredFeedStock.reduce((acc, row) => {
+  const feedStockGrouped = Object.values(
+    feedStock.reduce((acc, row) => {
       const feedType = normalizeFeedType(row?.feed_type)
       if (!feedType || !row?.date) return acc
       const key = `${row.date}__${feedType}`
@@ -326,21 +342,27 @@ export default function Stock() {
               <thead className="bg-[#245658] text-white border-b border-gray-300">
                 <tr>
                   <th className="px-4 py-3 text-left border border-gray-300">RM Type</th>
-                  <th className="px-4 py-3 text-left border border-gray-300">Available Stock</th>
+                  <th className="px-4 py-3 text-left border border-gray-300">Available Stock in (Kg)</th>
+                  <th className="px-4 py-3 text-left border border-gray-300">
+                      Available Stock in (MT) 
+                    </th>
                 </tr>
               </thead>
               <tbody>
                 {rmAvailableStock.length === 0 ? (
                   <tr>
-                    <td colSpan={2} className="px-4 py-3 text-gray-500 border border-gray-300">
+                    <td colSpan={3} className="px-4 py-3 text-gray-500 border border-gray-300">
                       No RM stock data available.
                     </td>
                   </tr>
                 ) : (
                   rmAvailableStock.map((row) => (
                     <tr key={row.name} className="border-b border-gray-700/50 hover:bg-primary-light/30">
-                      <td className="px-4 py-3 text-slate-800">{row.name}</td>
-                      <td className="px-4 py-3 text-accent-green font-medium">{formatQty(row.closing)}</td>
+                      <td className="px-4 py-3  border border-gray-300 text-slate-800">{row.name}</td>
+                      <td className="px-4 py-3  border border-gray-300 text-accent-green font-medium">{formatQty(row.closing)}</td>
+                       <td className="px-4 py-3 border border-gray-300 text-accent-green font-medium">
+                        {formatMt(row.closing)}
+                      </td>
                     </tr>
                   ))
                 )}
@@ -366,22 +388,24 @@ export default function Stock() {
                 <tr>
                   <th className="px-4 py-3 text-left border border-gray-300">Feed Type</th>
                   <th className="px-4 py-3 text-left border border-gray-300">Bag Size Mix</th>
-                  <th className="px-4 py-3 text-left border border-gray-300">Available Stock</th>
+                  <th className="px-4 py-3 text-left border border-gray-300">Available Stock (Kg)</th>
+                     <th className="px-4 py-3 text-left border border-gray-300">Available Stock in (MT)</th>
                 </tr>
               </thead>
               <tbody>
                 {feedAvailableStockRows.length === 0 ? (
                   <tr>
-                    <td colSpan={3} className="px-4 py-3 text-gray-500 border border-gray-300">
+                    <td colSpan={4} className="px-4 py-3 text-gray-500 border border-gray-300">
                       No feed stock data available.
                     </td>
                   </tr>
                 ) : (
                   feedAvailableStockRows.map((row) => (
                     <tr key={row.name} className="border-b border-gray-700/50 hover:bg-primary-light/30">
-                      <td className="px-4 py-3 text-slate-800">{row.name}</td>
-                      <td className="px-4 py-3 text-slate-800">{renderBagMix(row.bagMix)}</td>
-                      <td className="px-4 py-3 text-accent-green font-medium">{formatQty(row.closing)}</td>
+                      <td className="px-4 py-3 border border-gray-300  text-slate-800">{row.name}</td>
+                      <td className="px-4 py-3 border border-gray-300  text-slate-800">{renderBagMix(row.bagMix)}</td>
+                      <td className="px-4 py-3 border border-gray-300  text-accent-green font-medium">{formatQty(row.closing)}</td>
+                        <td className="px-4 py-3 border border-gray-300  text-accent-green font-medium">{formatMt(row.closing)}</td>
                     </tr>
                   ))
                 )}
@@ -448,14 +472,14 @@ export default function Stock() {
               </tr>
             </thead>
             <tbody>
-              {filteredRmStock.length === 0 ? (
+              {rmStock.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-3 text-gray-500 border border-gray-300">
                     No raw material stock rows for selected range.
                   </td>
                 </tr>
               ) : (
-                filteredRmStock.map((r, i) => (
+                rmStock.map((r, i) => (
                   <tr key={i} className="border-b border-gray-700/50 hover:bg-primary-light/30">
                     <td className="px-4 py-3 text-gray-800">{formatDateIST(r.date)}</td>
                     <td className="px-4 py-3 text-slate-800">{r.rm_name}</td>
@@ -528,14 +552,14 @@ export default function Stock() {
               </tr>
             </thead>
             <tbody>
-              {filteredFeedStockGrouped.length === 0 ? (
+              {feedStockGrouped.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="px-4 py-3 text-gray-500 border border-gray-300">
                     No feed stock rows for selected range.
                   </td>
                 </tr>
               ) : (
-                filteredFeedStockGrouped.map((r, i) => (
+                feedStockGrouped.map((r, i) => (
                   <tr key={i} className="border-b border-gray-700/50 hover:bg-primary-light/30">
                     <td className="px-4 py-3 text-gray-800">{formatDateIST(r.date)}</td>
                     <td className="px-4 py-3 text-slate-800">{r.feed_type}</td>

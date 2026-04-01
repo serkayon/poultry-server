@@ -18,6 +18,7 @@ MACHINE_STATE_ID = 1
 
 BASE_STATE = {
     "running_status": False,
+    "process_status": 0,
     "ambient_temp": 28.0,
     "humidity": 65.0,
     "pressure_before": 4.2,
@@ -51,6 +52,7 @@ def _state_from_row(row: PLCDataSnapshot | None) -> dict:
         return dict(BASE_STATE)
     return {
         "running_status": bool(row.running_status),
+        "process_status": int(row.process_status or (100 if row.running_status else 0)),
         "ambient_temp": float(row.ambient_temp or BASE_STATE["ambient_temp"]),
         "humidity": float(row.humidity or BASE_STATE["humidity"]),
         "pressure_before": float(row.pressure_before or BASE_STATE["pressure_before"]),
@@ -93,6 +95,7 @@ def _insert_snapshot(
         PLCDataSnapshot(
             client_id=client_id,
             running_status=bool(state.get("running_status", False)),
+            process_status=int(state.get("process_status", 100 if state.get("running_status", False) else 0)),
             ambient_temp=round(float(state["ambient_temp"]), 1),
             humidity=round(float(state["humidity"]), 1),
             pressure_before=round(float(state["pressure_before"]), 2),
@@ -126,16 +129,19 @@ def set_machine_running(
     active_batch_id: int | None = None,
 ) -> MachineState:
     machine_state = get_or_create_machine_state(db)
+    was_running = bool(machine_state.is_running)
     machine_state.is_running = running
     machine_state.updated_at = datetime.utcnow()
     machine_state.active_batch_id = active_batch_id if running else None
 
-    latest_row = db.execute(
-        select(PLCDataSnapshot).order_by(PLCDataSnapshot.recorded_at.desc()).limit(1)
-    ).scalars().one_or_none()
-    state = _state_from_row(latest_row)
-    state["running_status"] = running
-    _insert_snapshot(db=db, state=state, recorded_at=datetime.utcnow())
+    if was_running != bool(running):
+        latest_row = db.execute(
+            select(PLCDataSnapshot).order_by(PLCDataSnapshot.recorded_at.desc()).limit(1)
+        ).scalars().one_or_none()
+        state = _state_from_row(latest_row)
+        state["running_status"] = running
+        state["process_status"] = 100 if running else 0
+        _insert_snapshot(db=db, state=state, recorded_at=datetime.utcnow())
     return machine_state
 
 
@@ -169,6 +175,7 @@ def ensure_plc_live_data(
 
         state = _state_from_row(latest_row)
         state["running_status"] = True
+        state["process_status"] = 100
         fill_start = window_start
         if latest_row:
             last_slot = _interval_floor(latest_row.recorded_at, step_seconds)
@@ -186,6 +193,7 @@ def ensure_plc_live_data(
         while cursor <= now_slot:
             state = _advance_state(state)
             state["running_status"] = True
+            state["process_status"] = 100
             _insert_snapshot(db=db, state=state, recorded_at=cursor, client_id=client_id)
             cursor += step
 
@@ -200,6 +208,7 @@ def run_plc_simulation(interval_seconds: int = 5):
                 if machine_state.is_running:
                     state = _advance_state(state)
                     state["running_status"] = True
+                    state["process_status"] = 100
                     _insert_snapshot(session, state=state, recorded_at=datetime.utcnow())
                 session.commit()
         except Exception:

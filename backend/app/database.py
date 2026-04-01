@@ -140,6 +140,17 @@ def init_db():
         if "pellet_motor_load" not in existing_columns:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE plc_data_snapshots ADD COLUMN pellet_motor_load FLOAT"))
+        if "process_status" not in existing_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE plc_data_snapshots ADD COLUMN process_status INTEGER"))
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE plc_data_snapshots "
+                    "SET process_status = CASE WHEN running_status THEN 100 ELSE 0 END "
+                    "WHERE process_status IS NULL"
+                )
+            )
     if inspector.has_table("product_types"):
         existing_columns = {col["name"] for col in inspector.get_columns("product_types")}
         if "last_modified_at" not in existing_columns:

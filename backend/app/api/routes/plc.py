@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 
 from ..fastapi_compat import Blueprint, jsonify, request
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from ..common import DEFAULT_CLIENT_ID, db_session, dt, error, serialize_batch
 from ...models.plc import PLCDataSnapshot
@@ -24,9 +24,12 @@ plc_bp = Blueprint("plc", __name__, url_prefix="/api/plc")
 
 
 def _serialize_plc_row(row: PLCDataSnapshot | None, running_status: bool) -> dict:
+    resolved_status = int(row.process_status) if row and row.process_status is not None else (100 if running_status else 0)
     return {
         "id": row.id if row else None,
         "running_status": running_status,
+        "status": resolved_status,
+        "process_status": resolved_status,
         "ambient_temp": row.ambient_temp if row else None,
         "humidity": row.humidity if row else None,
         "pressure_before": row.pressure_before if row else None,
@@ -39,6 +42,40 @@ def _serialize_plc_row(row: PLCDataSnapshot | None, running_status: bool) -> dic
         "pellet_motor_load": row.pellet_motor_load if row else None,
         "recorded_at": dt(row.recorded_at) if row else None,
     }
+
+
+def _resolved_status(row: PLCDataSnapshot) -> int:
+    if row.process_status is not None:
+        return int(row.process_status)
+    return 100 if bool(row.running_status) else 0
+
+
+def _serialize_plc_history_row(row: PLCDataSnapshot) -> dict:
+    resolved_status = _resolved_status(row)
+    return {
+        "recorded_at": dt(row.recorded_at),
+        "status": resolved_status,
+        "process_status": resolved_status,
+        "ambient_temp": row.ambient_temp,
+        "humidity": row.humidity,
+        "pressure_before": row.pressure_before,
+        "pressure_after": row.pressure_after,
+        "conditioner_temp": row.conditioner_temp,
+        "bagging_temp": row.bagging_temp,
+        "pellet_feeder_speed": row.pellet_feeder_speed,
+        "pellet_motor_load": row.pellet_motor_load,
+    }
+
+
+def _as_bool_arg(raw_value) -> bool:
+    return str(raw_value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _process_status_expr():
+    return func.coalesce(
+        PLCDataSnapshot.process_status,
+        case((PLCDataSnapshot.running_status.is_(True), 100), else_=0),
+    )
 
 
 def _active_batch_payload(db, machine_state) -> dict | None:
@@ -83,8 +120,15 @@ def _active_batch_payload(db, machine_state) -> dict | None:
 
 
 def _machine_status_payload(machine_state, latest_row: PLCDataSnapshot | None, active_batch: dict | None) -> dict:
+    resolved_status = (
+        int(latest_row.process_status)
+        if latest_row and latest_row.process_status is not None
+        else (100 if machine_state.is_running else 0)
+    )
     return {
         "is_running": bool(machine_state.is_running),
+        "status": resolved_status,
+        "process_status": resolved_status,
         "active_batch_id": machine_state.active_batch_id,
         "active_batch": active_batch,
         "updated_at": dt(machine_state.updated_at),
@@ -114,43 +158,72 @@ def plc_history():
         return error("minutes must be an integer")
     if minutes <= 0:
         return error("minutes must be greater than 0")
+    current_process_only = _as_bool_arg(request.args.get("current_process_only"))
 
-    since = datetime.utcnow() - timedelta(minutes=minutes)
     with db_session() as db:
         machine_state = get_or_create_machine_state(db)
         synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
         if synced_batch:
             try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
         ensure_plc_live_data(db, minutes=max(minutes, 60))
-        rows = (
-            db.execute(
+        if current_process_only:
+            latest_row = (
+                db.execute(
+                    select(PLCDataSnapshot).order_by(PLCDataSnapshot.recorded_at.desc()).limit(1)
+                )
+                .scalars()
+                .one_or_none()
+            )
+            if latest_row is None or _resolved_status(latest_row) != 100:
+                return jsonify([])
+
+            run_end = latest_row.recorded_at
+            run_window_start = run_end - timedelta(minutes=minutes)
+            status_expr = _process_status_expr()
+
+            latest_non_running = (
+                db.execute(
+                    select(PLCDataSnapshot.recorded_at)
+                    .where(
+                        PLCDataSnapshot.recorded_at < run_end,
+                        status_expr != 100,
+                    )
+                    .order_by(PLCDataSnapshot.recorded_at.desc())
+                    .limit(1)
+                )
+                .first()
+            )
+            latest_non_running_at = latest_non_running[0] if latest_non_running else None
+
+            query = (
                 select(PLCDataSnapshot)
-                .where(PLCDataSnapshot.recorded_at >= since)
+                .where(
+                    PLCDataSnapshot.recorded_at >= run_window_start,
+                    PLCDataSnapshot.recorded_at <= run_end,
+                    status_expr == 100,
+                )
                 .order_by(PLCDataSnapshot.recorded_at.asc())
             )
-            .scalars()
-            .all()
-        )
+            if latest_non_running_at is not None:
+                query = query.where(PLCDataSnapshot.recorded_at > latest_non_running_at)
+
+            rows = db.execute(query).scalars().all()
+        else:
+            since = datetime.utcnow() - timedelta(minutes=minutes)
+            rows = (
+                db.execute(
+                    select(PLCDataSnapshot)
+                    .where(PLCDataSnapshot.recorded_at >= since)
+                    .order_by(PLCDataSnapshot.recorded_at.asc())
+                )
+                .scalars()
+                .all()
+            )
 
     if not rows:
         return jsonify([])
 
-    return jsonify(
-        [
-            {
-                "recorded_at": dt(row.recorded_at),
-                "ambient_temp": row.ambient_temp,
-                "humidity": row.humidity,
-                "pressure_before": row.pressure_before,
-                "pressure_after": row.pressure_after,
-                "conditioner_temp": row.conditioner_temp,
-                "bagging_temp": row.bagging_temp,
-                "pellet_feeder_speed": row.pellet_feeder_speed,
-                "pellet_motor_load": row.pellet_motor_load,
-            }
-            for row in rows
-        ]
-    )
+    return jsonify([_serialize_plc_history_row(row) for row in rows])
 
 
 @plc_bp.get("/machine/status")
@@ -183,6 +256,8 @@ def machine_start():
         sync_active_batch_progress(db, machine_state=machine_state)
 
         if batch_id is not None:
+            if machine_state.active_batch_id and machine_state.active_batch_id != batch_id:
+                return error("Another batch is already active. Stop it before starting a new one.")
             batch = (
                 db.execute(
                     select(ProductionBatch).where(
@@ -196,8 +271,9 @@ def machine_start():
             if batch is None:
                 return error("Batch not found", 404)
 
-            if (batch.hmi_status or "").lower() == RUN_STATUS_COMPLETED:
-                return error("Batch is already completed.")
+            batch_status = (batch.hmi_status or "").lower()
+            if batch_status in {RUN_STATUS_COMPLETED, RUN_STATUS_STOPPED}:
+                return error("Stopped/completed batches cannot be restarted. Create a new batch.")
 
             planned_count = normalize_batch_count(batch.batch_size)
             if planned_count <= 0:
@@ -208,14 +284,10 @@ def machine_start():
                 return error("Duration per count is missing for this batch.")
 
             completed_count = max(0, int(batch.hmi_completed_count or 0))
-            if completed_count >= planned_count:
-                return error("Batch is already completed.")
-
             if completed_count > 0:
-                batch.hmi_started_at = datetime.utcnow() - timedelta(
-                    seconds=max(0.0, (completed_count - 1) * duration)
-                )
-            elif batch.hmi_started_at is None:
+                return error("Partially run batches cannot be restarted. Create a new batch.")
+
+            if batch.hmi_started_at is None:
                 batch.hmi_started_at = datetime.utcnow()
             batch.hmi_status = RUN_STATUS_RUNNING
             batch.hmi_completed_at = None

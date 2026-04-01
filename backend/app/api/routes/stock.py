@@ -1,7 +1,14 @@
 from ..fastapi_compat import Blueprint, Response, jsonify, request
 from sqlalchemy import select
 
-from ..common import DEFAULT_CLIENT_ID, db_session, error, dt, parse_datetime
+from ..common import (
+    DEFAULT_CLIENT_ID,
+    db_session,
+    dt,
+    error,
+    parse_datetime,
+    resolve_period_range,
+)
 from ...models.raw_material import RawMaterialType
 from ...models.stock import FeedStock, RMStockLedger
 from ...utils.export import (
@@ -26,6 +33,17 @@ def _feed_variant_name(feed_type: str, bag_weight_grams: int | None) -> str:
     if bag_kg is None:
         return feed_type
     return f"{feed_type} ({bag_kg:g}kg/bag)"
+
+
+def _normalize_stock_period(period: str | None) -> str:
+    normalized = str(period or "").strip().lower()
+    if normalized == "last_7_days":
+        return "last_7"
+    if normalized == "last_15_days":
+        return "last_15"
+    if normalized == "last_30_days":
+        return "last_30"
+    return normalized
 
 
 @stock_bp.get("/rm")
@@ -59,6 +77,78 @@ def get_rm_stock():
     )
 
 
+@stock_bp.get("/rm/filtered/<period>")
+def get_rm_stock_by_period(period: str):
+    try:
+        from_date, to_date = resolve_period_range(
+            _normalize_stock_period(period),
+            from_date_raw=request.args.get("from_date"),
+            to_date_raw=request.args.get("to_date"),
+        )
+    except ValueError as exc:
+        return error(str(exc))
+
+    with db_session() as db:
+        rows = (
+            db.execute(
+                select(RMStockLedger)
+                .where(RMStockLedger.client_id == DEFAULT_CLIENT_ID)
+                .where(RMStockLedger.date >= from_date)
+                .where(RMStockLedger.date <= to_date)
+                .order_by(RMStockLedger.date.desc(), RMStockLedger.id.desc())
+            )
+            .scalars()
+            .all()
+        )
+    return jsonify(
+        [
+            {
+                "date": dt(row.date),
+                "rm_name": row.rm_name,
+                "opening_stock": row.opening_stock,
+                "received": row.received,
+                "consumption": row.consumption,
+                "closing_stock": row.closing_stock,
+            }
+            for row in rows
+        ]
+    )
+
+
+@stock_bp.get("/rm/summary")
+def rm_summary():
+    with db_session() as db:
+        rm_types = (
+            db.execute(select(RawMaterialType).order_by(RawMaterialType.name.asc()))
+            .scalars()
+            .all()
+        )
+        rows = (
+            db.execute(
+                select(RMStockLedger)
+                .where(RMStockLedger.client_id == DEFAULT_CLIENT_ID)
+                .order_by(RMStockLedger.date.desc(), RMStockLedger.id.desc())
+            )
+            .scalars()
+            .all()
+        )
+
+    latest_by_name: dict[str, float] = {}
+    for row in rows:
+        if row.rm_name not in latest_by_name:
+            latest_by_name[row.rm_name] = row.closing_stock
+
+    ordered_names = [item.name for item in rm_types]
+    known_names = set(ordered_names)
+    for rm_name in latest_by_name:
+        if rm_name not in known_names:
+            ordered_names.append(rm_name)
+
+    return jsonify(
+        [{"rm_name": name, "quantity": latest_by_name.get(name, 0)} for name in ordered_names]
+    )
+
+
 @stock_bp.get("/feed")
 def get_feed_stock():
     try:
@@ -75,6 +165,46 @@ def get_feed_stock():
             )
         query = query.order_by(FeedStock.date.desc())
         rows = db.execute(query).scalars().all()
+    return jsonify(
+        [
+            {
+                "date": dt(row.date),
+                "feed_type": row.feed_type,
+                "bag_weight_kg": _bag_weight_kg(row.bag_weight_grams),
+                "feed_variant": _feed_variant_name(row.feed_type, row.bag_weight_grams),
+                "opening_stock": row.opening_stock,
+                "produced": row.produced,
+                "dispatched": row.dispatched,
+                "closing_stock": row.closing_stock,
+            }
+            for row in rows
+        ]
+    )
+
+
+@stock_bp.get("/feed/filtered/<period>")
+def get_feed_stock_by_period(period: str):
+    try:
+        from_date, to_date = resolve_period_range(
+            _normalize_stock_period(period),
+            from_date_raw=request.args.get("from_date"),
+            to_date_raw=request.args.get("to_date"),
+        )
+    except ValueError as exc:
+        return error(str(exc))
+
+    with db_session() as db:
+        rows = (
+            db.execute(
+                select(FeedStock)
+                .where(FeedStock.client_id == DEFAULT_CLIENT_ID)
+                .where(FeedStock.date >= from_date)
+                .where(FeedStock.date <= to_date)
+                .order_by(FeedStock.date.desc(), FeedStock.id.desc())
+            )
+            .scalars()
+            .all()
+        )
     return jsonify(
         [
             {

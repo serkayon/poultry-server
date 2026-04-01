@@ -1,5 +1,5 @@
 import React from "react";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { dispatchApi, plc, productionApi, stockApi } from "../api/client";
 import {
@@ -51,8 +51,6 @@ export default function Dashboard() {
   const [plcHistory, setPlcHistory] = useState([]);
   const [machineStatus, setMachineStatus] = useState(null);
   const [dateTime, setDateTime] = useState(new Date());
-  const displayedBatchIdRef = useRef(null);
-  const hasGraphHistoryRef = useRef(false);
   const [todayMetrics, setTodayMetrics] = useState({
     rawMaterialStockKg: 0,
     currentDayDispatchKg: 0,
@@ -63,7 +61,7 @@ export default function Dashboard() {
   const formatMt = (valueKg) => {
     const safeKg = Math.max(0, Number(valueKg) || 0);
     const safeMt = safeKg / 1000;
-    return safeMt.toFixed(3);
+    return Number(safeMt.toFixed(3));
   };
 
   const toApiDateTimeFromDateInputIST = (dateInput, endOfDay = false) =>
@@ -206,133 +204,24 @@ export default function Dashboard() {
 
   //Update the PLC data and history every 5 seconds
   useEffect(() => {
-    const resolveBatchWindow = (batch) => {
-      const startedAt = batch?.started_at || batch?.date || batch?.created_at || null;
-      const endedAt = batch?.completed_at || batch?.last_modified_at || batch?.date || startedAt;
-      if (!parseApiDate(startedAt)) return null;
-      return { startedAt, endedAt };
-    };
-
-    const loadBatchHistory = async ({ startedAt, endedAt = null }) => {
-      const batchStartedAt = parseApiDate(startedAt);
-      if (!batchStartedAt) return [];
-
-      const parsedEndedAt = parseApiDate(endedAt) || new Date();
-      const batchEndedAt =
-        parsedEndedAt.getTime() >= batchStartedAt.getTime()
-          ? parsedEndedAt
-          : batchStartedAt;
-      const elapsedMinutes = Math.max(
-        1,
-        Math.ceil((batchEndedAt.getTime() - batchStartedAt.getTime()) / 60000) + 2
-      );
-      const historyWindowMinutes = Math.max(60, elapsedMinutes);
-      const historyRes = await plc.history(historyWindowMinutes);
-      const historyRows = Array.isArray(historyRes?.data) ? historyRes.data : [];
-      const startTs = batchStartedAt.getTime();
-      const endTs = batchEndedAt.getTime();
-
-      return historyRows.filter((row) => {
-        const ts = parseApiDate(row?.recorded_at)?.getTime();
-        return Number.isFinite(ts) && ts >= startTs && ts <= endTs;
-      });
-    };
-
     const refresh = async () => {
-      try {
-        const [latestRes, machineStatusRes] = await Promise.all([
-          plc.latest(),
-          plc.machineStatus(),
-        ]);
+      const [latestResult, machineStatusResult, historyResult] = await Promise.allSettled([
+        plc.latest(),
+        plc.machineStatus(),
+        plc.history(60, { current_process_only: 1 }),
+      ]);
 
-        const latestData = latestRes?.data || null;
-        const machineStatusData = machineStatusRes?.data || null;
-        setPlcData(latestData);
-        setMachineStatus(machineStatusData);
-
-        const activeBatch = machineStatusData?.active_batch || null;
-        const activeRunStatus = String(activeBatch?.run_status || "").toLowerCase();
-        const batchStartedAt = parseApiDate(activeBatch?.started_at);
-        const activeBatchId = activeBatch?.id ?? null;
-        const isBatchRunning =
-          Boolean(machineStatusData?.is_running) &&
-          activeRunStatus === "running" &&
-          Boolean(batchStartedAt);
-
-        if (isBatchRunning && batchStartedAt) {
-          const isNewBatch = displayedBatchIdRef.current !== activeBatchId;
-          if (isNewBatch) {
-            setPlcHistory([]);
-            hasGraphHistoryRef.current = false;
-          }
-
-          const filteredBatchRows = await loadBatchHistory({
-            startedAt: activeBatch?.started_at,
-          });
-          if (filteredBatchRows.length > 0) {
-            setPlcHistory(filteredBatchRows);
-            hasGraphHistoryRef.current = true;
-          }
-          displayedBatchIdRef.current = activeBatchId;
-          return;
-        }
-
-        // Freeze the graph once a running batch stops; do not auto-switch
-        // to older batches until a new batch starts or the page reloads.
-        if (displayedBatchIdRef.current != null && hasGraphHistoryRef.current) {
-          return;
-        }
-
-        const batchesRes = await productionApi.listBatches();
-        const batches = Array.isArray(batchesRes?.data) ? batchesRes.data : [];
-        const batchesWithWindow = batches
-          .map((batch) => {
-            const window = resolveBatchWindow(batch);
-            if (!window) return null;
-            const startedAtTs = parseApiDate(window.startedAt)?.getTime();
-            if (!Number.isFinite(startedAtTs)) return null;
-            const endedAtRawTs = parseApiDate(window.endedAt)?.getTime();
-            const endedAtTs = Number.isFinite(endedAtRawTs)
-              ? Math.max(startedAtTs, endedAtRawTs)
-              : startedAtTs;
-            return {
-              batch,
-              window,
-              endedAtTs,
-              status: String(batch?.run_status || "").toLowerCase(),
-            };
-          })
-          .filter(Boolean)
-          .sort((a, b) => b.endedAtTs - a.endedAtTs);
-        const latestFinishedBatch =
-          batchesWithWindow.find(
-            (entry) => entry.status === "completed" || entry.status === "stopped"
-          ) || batchesWithWindow[0] || null;
-
-        if (!latestFinishedBatch) {
-          return;
-        }
-
-        if (
-          displayedBatchIdRef.current === (latestFinishedBatch.batch?.id ?? null) &&
-          hasGraphHistoryRef.current
-        ) {
-          return;
-        }
-
-        const completedBatchRows = await loadBatchHistory({
-          startedAt: latestFinishedBatch.window.startedAt,
-          endedAt: latestFinishedBatch.window.endedAt,
-        });
-        if (completedBatchRows.length === 0) {
-          return;
-        }
-
-        setPlcHistory(completedBatchRows);
-        displayedBatchIdRef.current = latestFinishedBatch.batch?.id ?? null;
-        hasGraphHistoryRef.current = true;
-      } catch {
-        // Keep latest visible graph data on transient API failures.
+      if (latestResult.status === "fulfilled") {
+        setPlcData(latestResult.value?.data || null);
+      }
+      if (machineStatusResult.status === "fulfilled") {
+        setMachineStatus(machineStatusResult.value?.data || null);
+      }
+      if (historyResult.status === "fulfilled") {
+        const historyRows = Array.isArray(historyResult.value?.data)
+          ? historyResult.value.data
+          : [];
+        setPlcHistory(historyRows);
       }
     };
     refresh();
@@ -340,13 +229,20 @@ export default function Dashboard() {
     return () => clearInterval(t);
   }, []);
 
-  useEffect(() => {
-    hasGraphHistoryRef.current = Array.isArray(plcHistory) && plcHistory.length > 0;
-  }, [plcHistory]);
+  // Backend already returns only current process segment, capped by requested minutes.
+  const graphRows = (Array.isArray(plcHistory) ? plcHistory : [])
+    .map((row) => {
+      const ts = parseApiDate(row?.recorded_at)?.getTime();
+      if (!Number.isFinite(ts)) return null;
+      return {
+        ...row,
+        _ts: ts,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a._ts - b._ts);
 
-  //Graph Datta
-
-  const graphData = plcHistory.map((d) => ({
+  const graphData = graphRows.map((d) => ({
     time: d.recorded_at ? formatTime24IST(d.recorded_at, "") : "",
     temp: d.ambient_temp ?? 0,
     humidity: d.humidity ?? 0,
@@ -360,9 +256,7 @@ export default function Dashboard() {
   if (
     graphData.length === 0 &&
     plcData &&
-    machineStatus?.is_running &&
-    String(machineStatus?.active_batch?.run_status || "").toLowerCase() ===
-      "running"
+    machineStatus?.is_running
   ) {
     graphData.push({
       time: formatTime24IST(dateTime, ""),
@@ -418,6 +312,8 @@ export default function Dashboard() {
       graphData.length
     );
   };
+
+ 
 const [showRecipePopup, setShowRecipePopup] = useState(false)
   const avgTemp = calculateAvg("temp");
   const avgHumidity = calculateAvg("humidity");
@@ -436,6 +332,8 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
     ? `Batch #${activeBatch.batch_no || activeBatch.id}`
     : "N/A";
   const activeProgressLabel = activeBatch?.progress_label || "N/A";
+  const activeCompletedCount = activeBatch?.completed_count ?? "N/A";
+  const activeTotalCount = activeBatch?.planned_count ?? "N/A";
   const isMachineRunning =
     typeof machineStatus?.is_running === "boolean"
       ? machineStatus.is_running
@@ -556,21 +454,22 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
             <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wider">
               Product & Batch
             </h2>
-            <div className="text-right flex justify-center  align-center items-center gap-2">
+            {/* <div className="text-right flex justify-center  align-center items-center gap-2">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
                 Batch Count:
               </p>
               <p className="mt-1 inline-flex items-center rounded-md px-2.5 py-1 text-sm font-bold bg-slate-100 text-slate-800">
                 {activeProgressLabel}
               </p>
-            </div>
+            </div> */}
+       
           </div>
 
           <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white p-4">
             
                  <div className="flex items-center justify-between  md:gap-3">
               <div>
-                <p className="text-xs text-slate-500">Current Running Batch</p>
+                <p className="text-xs text-slate-500 font-semibold">Current Running Batch</p>
                 <p className="text-xl md:text-3xl font-extrabold text-[#245658] tracking-wide leading-none mt-1 mb-1">
                   {activeBatchLabel}
                 </p>
@@ -593,13 +492,58 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
   {activeRunStatus.toUpperCase()}
 </span>
             </div>
-            <p className="text-xs text-slate-500">Running Product</p>
-            <p className="mt-1 text-xl md:text-2xl font-semibold text-[#245658] tracking-wide leading-normal">
-              {activeBatch?.product_name || "N/A"}
-            </p>
+           <div className="flex items-center justify-between flex-wrap gap-3 mt-3">
 
-       
+  {/* LEFT - Running Product */}
+  <div >
+    <p className="text-xs text-slate-500 font-semibold">
+      Running Product
+    </p>
+    <p className="mt-1 text-xl md:text-2xl font-semibold text-[#245658] tracking-wide leading-normal">
+      {activeBatch?.product_name || "N/A"}
+    </p>
+  </div>
+ <div className="h-10 w-px bg-slate-400 hidden md:block "></div>
+  {/* RIGHT - Batch Counts */}
+  {/* <div className="flex items-center gap-4 bg-slate-100 px-2 py-1 rounded-lg mt-5" > */}
+
+    {/* Current Batch */}
+    <div className="flex flex-col items-center">
+      <p className="text-xs font-semibold text-slate-500 whitespace-nowrap">
+        Current Batch Count
+      </p>
+      <span className="text-xl font-bold text-[#15803D]">
+        {activeCompletedCount !== "N/A" ? (activeCompletedCount) : "N/A"}
+      </span>
+    </div>
+
+    {/* Divider */}
+    <div className="h-10 w-px bg-slate-400  hidden md:block "></div>
+
+    {/* Total Batch */}
+    <div className="flex flex-col items-center">
+      <p className="text-xs font-semibold text-slate-500 whitespace-nowrap">
+        Total Batch Count
+      </p>
+      <span className="text-lg font-bold text-slate-700">
+     {activeTotalCount !== "N/A" ? (activeTotalCount) : "N/A"}
+      </span>
+    </div>
+
+  {/* </div> */}
+</div>
+   <div className="lg:mt-1">
+  <button
+    onClick={() => setShowRecipePopup(true)}
+    className="mt-4 px-4 py-2  bg-[#245658] font-bold text-white rounded text-sm flex items-center gap-2"
+  >
+  
+    <span>View Recipe</span>
+  </button>
+</div>
           </div>
+
+          
 {showRecipePopup && (
   <div
     className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
@@ -677,15 +621,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
               </div>
             )}
           </div> */}
-        <div>
-  <button
-    onClick={() => setShowRecipePopup(true)}
-    className="mt-4 px-4 py-2  bg-[#245658] font-bold text-white rounded text-sm flex items-center gap-2"
-  >
-  
-    <span>View Recipe</span>
-  </button>
-</div>
+     
        
         </div>
 
@@ -723,10 +659,31 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
             </div>
 
             {/* Pressure Before */}
+           
+          
+            {/* Conditioner */}
             <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
               <div className="flex items-center gap-2 text-slate-900">
+                <Wind size={18} />
+                <span>Conditioner Temperature</span>
+              </div>
+              <span className="font-semibold text-slate-800 tabular-nums">
+                {sensorDisplay(plcData?.conditioner_temp, "C")}
+              </span>
+            </div>
+              <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
+              <div className="flex items-center gap-2 text-slate-900">
+                <Thermometer size={18} />
+                <span>Bagging Temperature</span>
+              </div>
+              <span className="font-semibold text-slate-800 tabular-nums">
+                {sensorDisplay(plcData?.bagging_temp, "C")}
+              </span>
+            </div>
+             <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
+              <div className="flex items-center gap-2 text-slate-900">
                 <Gauge size={18} />
-                <span>P Before</span>
+                <span>Pressure Before</span>
               </div>
               <span className="font-semibold text-slate-800 tabular-nums">
                 {sensorDisplay(plcData?.pressure_before, "bar")}
@@ -737,42 +694,14 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
             <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
               <div className="flex items-center gap-2 text-slate-900">
                 <Gauge size={18} />
-                <span>P After</span>
+                <span>Pressure After</span>
               </div>
               <span className="font-semibold text-slate-800 tabular-nums">
                 {sensorDisplay(plcData?.pressure_after, "bar")}
               </span>
             </div>
-            {/* FFEEDER SPEED */}
-            <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
-              <div className="flex items-center gap-2 text-slate-900">
-                <Activity size={18} />
-                <span>Feeder Speed</span>
-              </div>
-              <span className="font-semibold text-slate-800 tabular-nums">
-                {sensorDisplay(plcData?.pellet_feeder_speed, "rpm")}
-              </span>
-            </div>
-            {/* Conditioner */}
-            <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
-              <div className="flex items-center gap-2 text-slate-900">
-                <Wind size={18} />
-                <span>Conditioner</span>
-              </div>
-              <span className="font-semibold text-slate-800 tabular-nums">
-                {sensorDisplay(plcData?.conditioner_temp, "C")}
-              </span>
-            </div>
             {/* Bagging Temperature */}
-            <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
-              <div className="flex items-center gap-2 text-slate-900">
-                <Thermometer size={18} />
-                <span>Bagging Temp</span>
-              </div>
-              <span className="font-semibold text-slate-800 tabular-nums">
-                {sensorDisplay(plcData?.bagging_temp, "C")}
-              </span>
-            </div>
+          
 
             {/* Pellet Motor Load */}
             <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
@@ -782,6 +711,16 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
               </div>
               <span className="font-semibold text-slate-800 tabular-nums">
                 {sensorDisplay(plcData?.pellet_motor_load, "A")}
+              </span>
+            </div>
+              {/* FFEEDER SPEED */}
+            <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
+              <div className="flex items-center gap-2 text-slate-900">
+                <Activity size={18} />
+                <span>Feeder Speed</span>
+              </div>
+              <span className="font-semibold text-slate-800 tabular-nums">
+                {sensorDisplay(plcData?.pellet_feeder_speed, "rpm")}
               </span>
             </div>
           </div>
@@ -1501,7 +1440,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
                      label={{
-                    value: "Pressure Before & After",
+                    value: "Pressure Before & After (bar)",
                     angle: -90,
                     dx:-6,
                     position: "insideLeft",
@@ -1522,7 +1461,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                   <Legend wrapperStyle={{ fontSize: "12px" , paddingTop: 10}} />
                   <Area
                     type="monotone"
-                     name="Pressure Before"
+                     name="Pressure Before (bar)"
                     dataKey="pressureBefore"
                     stroke={chartColors.pressureBefore}
                     fill="url(#beforeGrad)"
@@ -1532,7 +1471,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                   <Area
                     type="monotone"
                     dataKey="pressureAfter"
-                     name="Pressure After"
+                     name="Pressure After (bar)"
                     stroke={chartColors.pressureAfter}
                     fill="url(#afterGrad)"
                     strokeWidth={2}

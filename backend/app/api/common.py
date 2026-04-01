@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from dateutil.parser import isoparse
 from .fastapi_compat import jsonify, request
@@ -14,6 +14,7 @@ from ..models.user import User
 from ..services.auth import create_access_token, decode_token
 
 DEFAULT_CLIENT_ID = 1
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -55,6 +56,57 @@ def parse_datetime(raw: str | None, field_name: str = "datetime") -> datetime | 
         return parsed
     except Exception as exc:
         raise ValueError(f"Invalid {field_name}: {raw}") from exc
+
+
+def resolve_period_range(
+    period: str | None,
+    *,
+    from_date_raw: str | None = None,
+    to_date_raw: str | None = None,
+) -> tuple[datetime, datetime]:
+    normalized = str(period or "").strip().lower()
+
+    if normalized in {"custom"}:
+        from_date = parse_datetime(from_date_raw, "from_date")
+        to_date = parse_datetime(to_date_raw, "to_date")
+        if from_date is None or to_date is None:
+            raise ValueError("from_date and to_date are required for custom period")
+        if from_date > to_date:
+            raise ValueError("from_date cannot be after to_date")
+        return from_date, to_date
+
+    now_ist = datetime.now(timezone.utc).astimezone(IST)
+    today_ist = now_ist.date()
+
+    if normalized in {"today"}:
+        start_day = today_ist
+        end_day = today_ist
+    elif normalized in {"last_7", "last7"}:
+        start_day = today_ist - timedelta(days=6)
+        end_day = today_ist
+    elif normalized in {"last_15", "last15"}:
+        start_day = today_ist - timedelta(days=14)
+        end_day = today_ist
+    elif normalized in {"last_30", "last30"}:
+        start_day = today_ist - timedelta(days=29)
+        end_day = today_ist
+    elif normalized in {"this_month", "current_month", "month"}:
+        start_day = today_ist.replace(day=1)
+        if start_day.month == 12:
+            next_month_start = date(start_day.year + 1, 1, 1)
+        else:
+            next_month_start = date(start_day.year, start_day.month + 1, 1)
+        end_day = next_month_start - timedelta(days=1)
+    else:
+        raise ValueError(
+            "Invalid period. Allowed: today, last_7, last_15, last_30, this_month, custom"
+        )
+
+    start_ist = datetime.combine(start_day, time(0, 0, 0), tzinfo=IST)
+    end_ist = datetime.combine(end_day, time(23, 59, 59), tzinfo=IST)
+    from_date = start_ist.astimezone(timezone.utc).replace(tzinfo=None)
+    to_date = end_ist.astimezone(timezone.utc).replace(tzinfo=None)
+    return from_date, to_date
 
 
 def required(payload: dict, field: str) -> str:
@@ -169,6 +221,7 @@ def serialize_batch(batch: ProductionBatch, has_report: bool, is_active: bool = 
         "batch_no": batch_no or str(batch.id),
         "date": dt(batch.date),
         "product_name": batch.product_name,
+        "recipe_id": batch.recipe_id,
         "batch_size": batch.batch_size,
         "mop": batch.mop,
         "water": batch.water,

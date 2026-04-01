@@ -65,6 +65,34 @@ def calculate_rm_consumption_quantity(
     return max(0.0, quantity) * _normalize_batch_run_count(batch_run_count)
 
 
+def resolve_effective_batch_run_count(
+    *,
+    batch_size: float | int | None,
+    hmi_completed_count: float | int | None,
+    hmi_status: str | None,
+) -> float:
+    """
+    Return actual utilized batch count for RM consumption calculations.
+    Priority:
+    1) hmi_completed_count when present (>0)
+    2) legacy fallback: if status is completed and completed_count is 0, use planned batch_size
+    3) otherwise 0
+    """
+    status = str(hmi_status or "").strip().lower()
+    if status != "completed":
+        return 0.0
+
+    planned_count = _normalize_batch_run_count(batch_size)
+    completed_count = _normalize_batch_run_count(hmi_completed_count)
+    if completed_count > 0:
+        if planned_count > 0:
+            return min(completed_count, planned_count)
+        return completed_count
+
+    # Legacy fallback for older completed rows that do not have completed_count populated.
+    return planned_count
+
+
 def _latest_rm_closing(
     db: Session,
     client_id: int,
@@ -355,6 +383,8 @@ def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
                 ProductionBatchMaterial.rm_name,
                 ProductionBatchMaterial.quantity,
                 ProductionBatch.batch_size,
+                ProductionBatch.hmi_completed_count,
+                ProductionBatch.hmi_status,
             )
             .join(ProductionBatch, ProductionBatch.id == ProductionBatchMaterial.batch_id)
             .where(ProductionBatch.client_id == client_id)
@@ -366,10 +396,15 @@ def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
         )
         .all()
     )
-    for date, rm_name, quantity, batch_size in consumption_rows:
+    for date, rm_name, quantity, batch_size, hmi_completed_count, hmi_status in consumption_rows:
+        effective_count = resolve_effective_batch_run_count(
+            batch_size=batch_size,
+            hmi_completed_count=hmi_completed_count,
+            hmi_status=hmi_status,
+        )
         consumption_quantity = calculate_rm_consumption_quantity(
             per_batch_quantity=quantity,
-            batch_run_count=batch_size,
+            batch_run_count=effective_count,
         )
         if consumption_quantity <= 0:
             continue

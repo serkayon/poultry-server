@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 
-BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://43.205.124.78:8000").rstrip("/")
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://43.205.124.78/:8000").rstrip("/")
 REQUEST_TIMEOUT_SECONDS = 10
 HMI_SECRET_KEY = os.getenv("HMI_SECRET_KEY", "hmi-local-dev-secret")
 
@@ -47,6 +47,58 @@ def _safe_get_json(path: str, fallback):
         return response.json()
     except Exception:
         return fallback
+
+
+def _response_error_detail(response: requests.Response, fallback: str) -> str:
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            detail = payload.get("detail") or payload.get("message") or payload.get("error")
+            if isinstance(detail, str) and detail.strip():
+                return detail.strip()
+    except Exception:
+        pass
+
+    response_text = (response.text or "").strip()
+    if response_text:
+        return f"{fallback} ({response.status_code}): {response_text[:300]}"
+    return f"{fallback} ({response.status_code})."
+
+
+def _legacy_start_batch(payload: dict) -> tuple[int | None, str | None]:
+    """
+    Backward-compatible fallback for older backend builds that don't expose
+    /api/production/hmi/start-batch yet.
+    """
+    create_response = requests.post(
+        _backend_url("/api/production/hmi/batches"),
+        json=payload,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    if create_response.status_code >= 400:
+        return None, _response_error_detail(create_response, "Unable to create batch")
+
+    try:
+        created = create_response.json()
+    except Exception:
+        created = {}
+
+    batch_id = created.get("id") if isinstance(created, dict) else None
+    if not batch_id:
+        return None, "Unable to start batch: backend did not return created batch ID."
+
+    machine_start_response = requests.post(
+        _backend_url("/api/plc/machine/start"),
+        json={"batch_id": int(batch_id)},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    if machine_start_response.status_code >= 400:
+        return None, _response_error_detail(
+            machine_start_response,
+            "Unable to start machine for this batch",
+        )
+
+    return int(batch_id), None
 
 
 def _suggest_batch_no_from_batches(batches: list[dict]) -> str:
@@ -99,11 +151,6 @@ def index(request: Request):
     )
     batches = _safe_get_json("/api/production/batches", [])
     safe_batches = batches if isinstance(batches, list) else []
-    pending_batches = [
-        item
-        for item in safe_batches
-        if isinstance(item, dict) and (item.get("run_status") or "").lower() != "completed"
-    ]
     latest_batch = safe_batches[0] if safe_batches else None
     suggested_batch_no = _suggest_batch_no_from_batches(safe_batches)
     messages = _pop_flashes(request)
@@ -124,7 +171,6 @@ def index(request: Request):
         context={
             "machine_status": machine_status,
             "batches": safe_batches,
-            "pending_batches": pending_batches,
             "latest_batch": latest_batch,
             "suggested_batch_no": suggested_batch_no,
             "today": _today_ist_iso(),
@@ -134,8 +180,8 @@ def index(request: Request):
     )
 
 
-@app.post("/batch/add", name="add_batch")
-async def add_batch(request: Request):
+@app.post("/batch/start", name="start_batch")
+async def start_batch(request: Request):
     form = await request.form()
     try:
         batch_no = str(form.get("batch_no") or "").strip()
@@ -148,10 +194,15 @@ async def add_batch(request: Request):
         if duration_seconds <= 0:
             raise ValueError("Duration per count must be greater than 0.")
 
+        recipe_id = int(form.get("recipe_id", ""))
+        if recipe_id <= 0:
+            raise ValueError("Recipe ID is required.")
+
         payload = {
             "batch_no": batch_no,
             "batch_count": batch_count,
             "duration_per_count_seconds": duration_seconds,
+            "recipe_id": recipe_id,
             "date": form.get("date"),
         }
     except ValueError as exc:
@@ -160,55 +211,52 @@ async def add_batch(request: Request):
 
     try:
         response = requests.post(
-            _backend_url("/api/production/hmi/batches"),
+            _backend_url("/api/production/hmi/start-batch"),
             json=payload,
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
-        if response.status_code >= 400:
-            try:
-                detail = response.json().get("detail", "Unable to add batch.")
-            except Exception:
-                detail = "Unable to add batch."
-            _flash(request, detail, "error")
+        if response.status_code == 404:
+            # Fallback path for legacy backend versions.
+            batch_id, fallback_error = _legacy_start_batch(payload)
+            if fallback_error:
+                _flash(request, fallback_error, "error")
+                return _redirect_to_index(request)
+            _flash(request, f"Batch #{batch_id} started.", "success")
             return _redirect_to_index(request)
-        batch_id = response.json().get("id")
-        _flash(request, f"Batch #{batch_id} created. Use Start to run.", "success")
+
+        if response.status_code >= 400:
+            _flash(request, _response_error_detail(response, "Unable to start batch"), "error")
+            return _redirect_to_index(request)
+
+        try:
+            batch_id = response.json().get("id")
+        except Exception:
+            batch_id = None
+        _flash(request, f"Batch #{batch_id} started.", "success")
     except Exception:
-        _flash(request, "Backend is unreachable. Batch was not created.", "error")
+        _flash(request, "Backend is unreachable. Batch was not started.", "error")
 
     return _redirect_to_index(request)
 
 
 @app.post("/machine/start", name="start_machine")
-async def start_machine(request: Request):
-    form = await request.form()
-    body = {}
-    batch_id = str(form.get("batch_id") or "").strip()
-    if not batch_id:
-        _flash(request, "Select a batch to start.", "error")
-        return _redirect_to_index(request)
-    try:
-        body["batch_id"] = int(batch_id)
-    except ValueError:
-        _flash(request, "batch_id must be a valid integer.", "error")
-        return _redirect_to_index(request)
-
+def start_machine(request: Request):
     try:
         response = requests.post(
             _backend_url("/api/plc/machine/start"),
-            json=body,
+            json={},
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         if response.status_code >= 400:
             try:
-                detail = response.json().get("detail", "Unable to start machine.")
+                detail = response.json().get("detail", "Unable to turn ON process.")
             except Exception:
-                detail = "Unable to start machine."
+                detail = "Unable to turn ON process."
             _flash(request, detail, "error")
             return _redirect_to_index(request)
-        _flash(request, "Machine started.", "success")
+        _flash(request, "Process turned ON.", "success")
     except Exception:
-        _flash(request, "Backend is unreachable. Machine was not started.", "error")
+        _flash(request, "Backend is unreachable. Process was not turned ON.", "error")
 
     return _redirect_to_index(request)
 
@@ -223,17 +271,39 @@ def stop_machine(request: Request):
         )
         if response.status_code >= 400:
             try:
-                detail = response.json().get("detail", "Unable to stop machine.")
+                detail = response.json().get("detail", "Unable to turn OFF process.")
             except Exception:
-                detail = "Unable to stop machine."
+                detail = "Unable to turn OFF process."
             _flash(request, detail, "error")
             return _redirect_to_index(request)
-        _flash(request, "Machine stopped.", "success")
+        _flash(request, "Process turned OFF.", "success")
     except Exception:
-        _flash(request, "Backend is unreachable. Machine was not stopped.", "error")
+        _flash(request, "Backend is unreachable. Process was not turned OFF.", "error")
+
+    return _redirect_to_index(request)
+
+
+@app.post("/batch/stop", name="stop_batch")
+def stop_batch(request: Request):
+    try:
+        response = requests.post(
+            _backend_url("/api/production/hmi/stop-active-batch"),
+            json={},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail", "Unable to stop active batch.")
+            except Exception:
+                detail = "Unable to stop active batch."
+            _flash(request, detail, "error")
+            return _redirect_to_index(request)
+        _flash(request, "Active batch stopped.", "success")
+    except Exception:
+        _flash(request, "Backend is unreachable. Active batch was not stopped.", "error")
 
     return _redirect_to_index(request)
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8010, reload=True)
+    uvicorn.run(app, host="127.0.0.1", port=8001, reload=True)
