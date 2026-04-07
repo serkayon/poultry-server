@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models.plc import MachineState
-from ..models.production import ProductionBatch
-from .stock import add_feed_produced, rebuild_rm_stock_ledger
+from ..models.production import ProductionBatch, ProductionBatchMaterial
+from .stock import (
+    add_feed_produced,
+    collect_rm_shortages,
+    format_rm_shortage_message,
+    rebuild_rm_stock_ledger,
+)
 
 
 RUN_STATUS_PENDING = "pending"
@@ -69,6 +75,112 @@ def try_post_batch_stock(db: Session, *, batch: ProductionBatch, client_id: int)
     return True
 
 
+def _batch_material_payload(db: Session, *, batch_id: int) -> list[dict]:
+    rows = (
+        db.execute(
+            select(ProductionBatchMaterial)
+            .where(ProductionBatchMaterial.batch_id == batch_id)
+            .order_by(ProductionBatchMaterial.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    return [{"rm_name": row.rm_name, "quantity": row.quantity} for row in rows]
+
+
+def evaluate_mark_complete_eligibility(
+    db: Session,
+    *,
+    batch: ProductionBatch,
+    client_id: int,
+) -> tuple[bool, str | None]:
+    assigned_count = normalize_batch_count(batch.batch_size)
+    if assigned_count <= 0:
+        return False, "Assigned batch count is invalid for this batch."
+
+    materials = _batch_material_payload(db, batch_id=batch.id)
+    shortages = collect_rm_shortages(
+        db=db,
+        client_id=client_id,
+        date=batch.date,
+        materials=materials,
+        batch_run_count=assigned_count,
+    )
+    if not shortages:
+        return True, None
+
+    detail = format_rm_shortage_message(
+        shortages,
+        heading=(
+            "Cannot mark batch as complete until raw material stock is available "
+            f"for assigned count ({assigned_count})"
+        ),
+    )
+    return False, detail
+
+
+def finalize_batch_consumption_state(
+    db: Session,
+    *,
+    batch: ProductionBatch,
+    client_id: int,
+) -> str | None:
+    planned_count = normalize_batch_count(batch.batch_size)
+    target_count = max(0, int(batch.hmi_completed_count or 0))
+    if planned_count > 0:
+        target_count = min(target_count, planned_count)
+    batch.hmi_completed_count = target_count
+
+    materials = _batch_material_payload(db, batch_id=batch.id)
+    shortages = collect_rm_shortages(
+        db=db,
+        client_id=client_id,
+        date=batch.date,
+        materials=materials,
+        batch_run_count=target_count,
+    )
+    if not shortages:
+        batch.rm_shortage_flag = False
+        batch.rm_shortage_detail = None
+        return None
+
+    batch.hmi_status = RUN_STATUS_STOPPED
+    detail = (
+        f"Assigned count: {planned_count}, utilized count: {target_count}.\n"
+        + format_rm_shortage_message(
+            shortages,
+            heading="Raw material shortage detected for this batch",
+        )
+    )
+    batch.rm_shortage_flag = True
+    batch.rm_shortage_detail = detail
+    return detail
+
+
+def finalize_batch_runtime_state(
+    db: Session,
+    *,
+    batch: ProductionBatch,
+    client_id: int,
+) -> str | None:
+    warning_detail = finalize_batch_consumption_state(
+        db=db,
+        batch=batch,
+        client_id=client_id,
+    )
+    try:
+        rebuild_rm_stock_ledger(db=db, client_id=client_id)
+    except ValueError as exc:
+        batch.hmi_status = RUN_STATUS_STOPPED
+        batch.rm_shortage_flag = True
+        if warning_detail:
+            batch.rm_shortage_detail = f"{warning_detail}\n{exc}"
+        else:
+            batch.rm_shortage_detail = str(exc)
+        return batch.rm_shortage_detail
+    return warning_detail
+
+
 def sync_active_batch_progress(
     db: Session,
     *,
@@ -77,7 +189,8 @@ def sync_active_batch_progress(
 ) -> ProductionBatch | None:
     """
     Update the active batch counter according to elapsed duration.
-    Auto-completes and stops machine when planned count is reached.
+    Auto-stops the batch when planned count is reached.
+    Final completion and stock/RM operations are handled manually.
     """
     if not machine_state.is_running or not machine_state.active_batch_id:
         return None
@@ -122,11 +235,9 @@ def sync_active_batch_progress(
     is_finished = duration <= 0 or elapsed_seconds >= (total_count * duration)
     if is_finished:
         batch.hmi_completed_count = total_count
-        batch.hmi_status = RUN_STATUS_COMPLETED
+        batch.hmi_status = RUN_STATUS_STOPPED
         batch.hmi_completed_at = now
         machine_state.active_batch_id = None
         machine_state.updated_at = now
-        # Finalized by PLC/runtime progression: recalculate RM ledger now.
-        rebuild_rm_stock_ledger(db=db, client_id=client_id)
 
     return batch

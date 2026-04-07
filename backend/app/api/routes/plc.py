@@ -17,8 +17,8 @@ from ...services.production_runtime import (
     RUN_STATUS_STOPPED,
     normalize_batch_count,
     sync_active_batch_progress,
-    try_post_batch_stock,
 )
+from ...services.stock import collect_rm_shortages, format_rm_shortage_message
 
 plc_bp = Blueprint("plc", __name__, url_prefix="/api/plc")
 
@@ -140,9 +140,7 @@ def _machine_status_payload(machine_state, latest_row: PLCDataSnapshot | None, a
 def plc_latest():
     with db_session() as db:
         machine_state = get_or_create_machine_state(db)
-        synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
-        if synced_batch:
-            try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
+        sync_active_batch_progress(db, machine_state=machine_state)
         ensure_plc_live_data(db, minutes=60)
         row = db.execute(
             select(PLCDataSnapshot).order_by(PLCDataSnapshot.recorded_at.desc()).limit(1)
@@ -162,9 +160,7 @@ def plc_history():
 
     with db_session() as db:
         machine_state = get_or_create_machine_state(db)
-        synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
-        if synced_batch:
-            try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
+        sync_active_batch_progress(db, machine_state=machine_state)
         ensure_plc_live_data(db, minutes=max(minutes, 60))
         if current_process_only:
             latest_row = (
@@ -230,9 +226,7 @@ def plc_history():
 def machine_status():
     with db_session() as db:
         machine_state = get_or_create_machine_state(db)
-        synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
-        if synced_batch:
-            try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
+        sync_active_batch_progress(db, machine_state=machine_state)
         latest_row = db.execute(
             select(PLCDataSnapshot).order_by(PLCDataSnapshot.recorded_at.desc()).limit(1)
         ).scalars().one_or_none()
@@ -287,6 +281,38 @@ def machine_start():
             if completed_count > 0:
                 return error("Partially run batches cannot be restarted. Create a new batch.")
 
+            material_rows = (
+                db.execute(
+                    select(ProductionBatchMaterial)
+                    .where(ProductionBatchMaterial.batch_id == batch.id)
+                    .order_by(ProductionBatchMaterial.id.asc())
+                )
+                .scalars()
+                .all()
+            )
+            shortages = collect_rm_shortages(
+                db=db,
+                client_id=DEFAULT_CLIENT_ID,
+                date=batch.date,
+                materials=[
+                    {"rm_name": row.rm_name, "quantity": row.quantity}
+                    for row in material_rows
+                ],
+                batch_run_count=planned_count,
+            )
+            if shortages:
+                batch.rm_shortage_flag = True
+                batch.rm_shortage_detail = format_rm_shortage_message(
+                    shortages,
+                    heading=(
+                        "Batch is running but projected raw material is insufficient "
+                        f"for assigned count ({planned_count})"
+                    ),
+                )
+            else:
+                batch.rm_shortage_flag = False
+                batch.rm_shortage_detail = None
+
             if batch.hmi_started_at is None:
                 batch.hmi_started_at = datetime.utcnow()
             batch.hmi_status = RUN_STATUS_RUNNING
@@ -298,9 +324,7 @@ def machine_start():
             running=True,
             active_batch_id=batch_id if batch_id is not None else machine_state.active_batch_id,
         )
-        synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
-        if synced_batch:
-            try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
+        sync_active_batch_progress(db, machine_state=machine_state)
         latest_row = db.execute(
             select(PLCDataSnapshot).order_by(PLCDataSnapshot.recorded_at.desc()).limit(1)
         ).scalars().one_or_none()

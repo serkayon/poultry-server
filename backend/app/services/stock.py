@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta
+from math import floor
+from typing import Mapping, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -70,14 +72,18 @@ def resolve_effective_batch_run_count(
     batch_size: float | int | None,
     hmi_completed_count: float | int | None,
     hmi_status: str | None,
+    rm_shortage_flag: bool | None = None,
 ) -> float:
     """
     Return actual utilized batch count for RM consumption calculations.
     Priority:
-    1) hmi_completed_count when present (>0)
+    1) hmi_completed_count when present (>0) for completed batches
     2) legacy fallback: if status is completed and completed_count is 0, use planned batch_size
     3) otherwise 0
     """
+    if bool(rm_shortage_flag):
+        return 0.0
+
     status = str(hmi_status or "").strip().lower()
     if status != "completed":
         return 0.0
@@ -91,6 +97,158 @@ def resolve_effective_batch_run_count(
 
     # Legacy fallback for older completed rows that do not have completed_count populated.
     return planned_count
+
+
+def get_rm_available_stock(
+    db: Session,
+    *,
+    client_id: int,
+    rm_name: str,
+    date: datetime,
+) -> float:
+    day = _start_of_day(date)
+    row = db.execute(
+        select(RMStockLedger).where(
+            RMStockLedger.client_id == client_id,
+            RMStockLedger.rm_name == rm_name,
+            RMStockLedger.date == day,
+        )
+    ).scalars().one_or_none()
+
+    if row:
+        return (
+            float(row.opening_stock or 0)
+            + float(row.received or 0)
+            - float(row.consumption or 0)
+        )
+
+    return _latest_rm_closing(db=db, client_id=client_id, rm_name=rm_name, day=day)
+
+
+def collect_rm_shortages(
+    db: Session,
+    *,
+    client_id: int,
+    date: datetime,
+    materials: Sequence[Mapping[str, object]],
+    batch_run_count: float | int | None,
+) -> list[dict]:
+    required_by_rm: dict[str, float] = {}
+
+    for material in materials:
+        rm_name = str(material.get("rm_name") or "").strip()
+        if not rm_name:
+            continue
+        required_quantity = calculate_rm_consumption_quantity(
+            per_batch_quantity=material.get("quantity"),
+            batch_run_count=batch_run_count,
+        )
+        if required_quantity <= 0:
+            continue
+        required_by_rm[rm_name] = required_by_rm.get(rm_name, 0.0) + float(required_quantity)
+
+    shortages: list[dict] = []
+    for rm_name in sorted(required_by_rm):
+        required_quantity = required_by_rm[rm_name]
+        available_quantity = get_rm_available_stock(
+            db=db,
+            client_id=client_id,
+            rm_name=rm_name,
+            date=date,
+        )
+        if required_quantity <= available_quantity:
+            continue
+        shortages.append(
+            {
+                "rm_name": rm_name,
+                "required_quantity": required_quantity,
+                "available_quantity": available_quantity,
+                "shortage_quantity": required_quantity - available_quantity,
+            }
+        )
+    return shortages
+
+
+def calculate_max_supported_batch_count(
+    db: Session,
+    *,
+    client_id: int,
+    date: datetime,
+    materials: Sequence[Mapping[str, object]],
+    requested_batch_count: float | int | None,
+) -> int:
+    try:
+        requested = max(0.0, float(requested_batch_count or 0))
+    except (TypeError, ValueError):
+        return 0
+
+    if requested <= 0:
+        return 0
+
+    per_batch_by_rm: dict[str, float] = {}
+    for material in materials:
+        rm_name = str(material.get("rm_name") or "").strip()
+        if not rm_name:
+            continue
+        try:
+            qty = float(material.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+        per_batch_by_rm[rm_name] = per_batch_by_rm.get(rm_name, 0.0) + qty
+
+    if not per_batch_by_rm:
+        return int(floor(requested))
+
+    supported = requested
+    for rm_name, per_batch_qty in per_batch_by_rm.items():
+        available = get_rm_available_stock(
+            db=db,
+            client_id=client_id,
+            rm_name=rm_name,
+            date=date,
+        )
+        if per_batch_qty <= 0:
+            continue
+        supported = min(supported, max(0.0, available / per_batch_qty))
+
+    return max(0, int(floor(supported + 1e-9)))
+
+
+def format_rm_shortage_message(
+    shortages: Sequence[Mapping[str, object]],
+    *,
+    heading: str = "Insufficient raw material stock",
+) -> str:
+    if not shortages:
+        return heading
+
+    lines = [f"{heading}:"]
+    for item in shortages:
+        rm_name = str(item.get("rm_name") or "").strip() or "Unknown RM"
+        try:
+            required_quantity = float(item.get("required_quantity") or 0)
+        except (TypeError, ValueError):
+            required_quantity = 0.0
+        try:
+            available_quantity = float(item.get("available_quantity") or 0)
+        except (TypeError, ValueError):
+            available_quantity = 0.0
+        try:
+            shortage_quantity = float(item.get("shortage_quantity") or 0)
+        except (TypeError, ValueError):
+            shortage_quantity = 0.0
+
+        lines.append(
+            (
+                f"- {rm_name} "
+                f"(required: {required_quantity:.3f} kg, "
+                f"available: {available_quantity:.3f} kg, "
+                f"shortage: {shortage_quantity:.3f} kg)"
+            )
+        )
+    return "\n".join(lines)
 
 
 def _latest_rm_closing(
@@ -385,6 +543,7 @@ def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
                 ProductionBatch.batch_size,
                 ProductionBatch.hmi_completed_count,
                 ProductionBatch.hmi_status,
+                ProductionBatch.rm_shortage_flag,
             )
             .join(ProductionBatch, ProductionBatch.id == ProductionBatchMaterial.batch_id)
             .where(ProductionBatch.client_id == client_id)
@@ -396,11 +555,20 @@ def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
         )
         .all()
     )
-    for date, rm_name, quantity, batch_size, hmi_completed_count, hmi_status in consumption_rows:
+    for (
+        date,
+        rm_name,
+        quantity,
+        batch_size,
+        hmi_completed_count,
+        hmi_status,
+        rm_shortage_flag,
+    ) in consumption_rows:
         effective_count = resolve_effective_batch_run_count(
             batch_size=batch_size,
             hmi_completed_count=hmi_completed_count,
             hmi_status=hmi_status,
+            rm_shortage_flag=rm_shortage_flag,
         )
         consumption_quantity = calculate_rm_consumption_quantity(
             per_batch_quantity=quantity,

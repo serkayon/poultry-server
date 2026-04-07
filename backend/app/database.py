@@ -79,6 +79,12 @@ def init_db():
         if "stock_posted" not in existing_columns:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE production_batches ADD COLUMN stock_posted BOOLEAN"))
+        if "rm_shortage_flag" not in existing_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE production_batches ADD COLUMN rm_shortage_flag BOOLEAN"))
+        if "rm_shortage_detail" not in existing_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE production_batches ADD COLUMN rm_shortage_detail TEXT"))
         with engine.begin() as conn:
             conn.execute(
                 text(
@@ -106,6 +112,13 @@ def init_db():
                     "UPDATE production_batches "
                     "SET stock_posted = CASE WHEN output > 0 THEN TRUE ELSE FALSE END "
                     "WHERE stock_posted IS NULL"
+                )
+            )
+            conn.execute(
+                text(
+                    "UPDATE production_batches "
+                    "SET rm_shortage_flag = FALSE "
+                    "WHERE rm_shortage_flag IS NULL"
                 )
             )
             conn.execute(
@@ -166,6 +179,23 @@ def init_db():
             )
     if inspector.has_table("users"):
         existing_columns = {col["name"] for col in inspector.get_columns("users")}
+        if "password" not in existing_columns:
+            with engine.begin() as conn:
+                if "hashed_password" in existing_columns:
+                    try:
+                        conn.execute(text("ALTER TABLE users RENAME COLUMN hashed_password TO password"))
+                    except Exception:
+                        conn.execute(text("ALTER TABLE users ADD COLUMN password VARCHAR(255)"))
+                        conn.execute(
+                            text(
+                                "UPDATE users "
+                                "SET password = hashed_password "
+                                "WHERE (password IS NULL OR password = '') "
+                                "AND hashed_password IS NOT NULL"
+                            )
+                        )
+                else:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN password VARCHAR(255)"))
         if "settings_pin_hash" not in existing_columns:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE users ADD COLUMN settings_pin_hash VARCHAR(255)"))
@@ -183,6 +213,14 @@ def init_db():
                     conn.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} VARCHAR(255)"))
         default_pin_value = "1234"
         with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE users "
+                    "SET password = :default_password "
+                    "WHERE password IS NULL OR password = ''"
+                ),
+                {"default_password": "open@123"},
+            )
             conn.execute(
                 text(
                     "UPDATE users "
@@ -237,7 +275,7 @@ def init_db():
             session.add(
                 User(
                     email="client@gmail.com",
-                    hashed_password=hash_password("open@123"),
+                    password=hash_password("open@123"),
                     settings_pin_hash=default_pin_hash,
                     pin_rm_entry_edit_hash=default_pin_hash,
                     pin_rm_lab_edit_hash=default_pin_hash,

@@ -16,6 +16,46 @@ const client = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 const encodePathParam = (value) => encodeURIComponent(String(value ?? ''))
+const AUTH_TOKEN_STORAGE_KEY = 'poultry_auth_token'
+const AUTH_USER_STORAGE_KEY = 'poultry_auth_user'
+
+const getStoredValue = (key) => {
+  if (typeof window === 'undefined') return ''
+  return String(window.localStorage.getItem(key) || '')
+}
+
+export const getAuthToken = () => getStoredValue(AUTH_TOKEN_STORAGE_KEY)
+export const getAuthUser = () => {
+  const raw = getStoredValue(AUTH_USER_STORAGE_KEY)
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+export const setAuthSession = (token, user = null) => {
+  if (typeof window === 'undefined') return
+  const normalizedToken = String(token || '').trim()
+  if (normalizedToken) {
+    window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, normalizedToken)
+  } else {
+    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY)
+  }
+
+  if (user && typeof user === 'object') {
+    window.localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(user))
+  } else {
+    window.localStorage.removeItem(AUTH_USER_STORAGE_KEY)
+  }
+}
+
+export const clearAuthSession = () => {
+  if (typeof window === 'undefined') return
+  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY)
+  window.localStorage.removeItem(AUTH_USER_STORAGE_KEY)
+}
 
 let backendReachable = true
 const backendStatusListeners = new Set()
@@ -87,6 +127,15 @@ client.interceptors.response.use(
     return Promise.reject(error)
   }
 )// it is the response interceptor, it will return the response as is, and in case of error it will reject the promise with the error
+
+client.interceptors.request.use((config) => {
+  const token = getAuthToken()
+  if (token) {
+    config.headers = config.headers || {}
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
 
 export default client
 
@@ -205,6 +254,8 @@ export const productionApi = {
       { params }
     ),
   getBatch: (id) => client.get(`/production/batches/${id}`),
+  markBatchCompleteEligibility: (id) =>
+    client.get(`/production/batches/${id}/mark-complete-eligibility`),
   createBatch: (data) => client.post('/production/batches', data),
   updateBatchDetails: (id, data) => client.put(`/production/batches/${id}/details`, data),
   markBatchComplete: (id) => client.post(`/production/batches/${id}/mark-complete`, {}),
@@ -271,6 +322,11 @@ export const productionApi = {
     }),
   downloadRMIndividual: (format = "pdf") =>
     client.get('/stock/download/rm-summary', {
+      params: { format },
+      responseType: 'blob'
+    }),
+  downloadFeedIndividual: (format = "pdf") =>
+    client.get('/stock/download/feed-summary', {
       params: { format },
       responseType: 'blob'
     }),

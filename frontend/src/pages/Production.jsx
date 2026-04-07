@@ -136,6 +136,11 @@ const [page, setPage] = useState(1)
 const pageSize = 5
 const [successMsg, setSuccessMsg] = useState('')
 const [markCompleteLoading, setMarkCompleteLoading] = useState(false)
+const [markCompleteEligibility, setMarkCompleteEligibility] = useState({
+  loading: false,
+  allowed: true,
+  detail: '',
+})
 
 
   // const loadBatches = () => {
@@ -278,10 +283,61 @@ useEffect(() => {
   setToDate(range.toDate)
 }, [dateRangeType])
 
-useEffect(() => {
+  useEffect(() => {
   if (!showReport || reportModalMode !== 'edit') return
   loadAvailableRawMaterialStock()
 }, [showReport, reportModalMode])
+
+useEffect(() => {
+  if (!showReport || reportModalMode !== 'edit') {
+    setMarkCompleteEligibility({ loading: false, allowed: true, detail: '' })
+    return
+  }
+
+  const candidateBatch = batchDetail?.batch || selectedBatch || null
+  const batchId = candidateBatch?.id || reportForm.batch_id
+  const runStatus = String(candidateBatch?.run_status || '').toLowerCase()
+  if (!batchId || (runStatus !== 'stopped' && runStatus !== 'pending')) {
+    setMarkCompleteEligibility({ loading: false, allowed: true, detail: '' })
+    return
+  }
+
+  let cancelled = false
+  setMarkCompleteEligibility({ loading: true, allowed: false, detail: '' })
+  productionApi
+    .markBatchCompleteEligibility(batchId)
+    .then(({ data }) => {
+      if (cancelled) return
+      setMarkCompleteEligibility({
+        loading: false,
+        allowed: Boolean(data?.allowed),
+        detail: String(data?.detail || '').trim(),
+      })
+    })
+    .catch((err) => {
+      if (cancelled) return
+      const detail = String(
+        err?.response?.data?.detail || 'Unable to validate stock for mark complete.'
+      ).trim()
+      setMarkCompleteEligibility({
+        loading: false,
+        allowed: false,
+        detail,
+      })
+    })
+
+  return () => {
+    cancelled = true
+  }
+}, [
+  showReport,
+  reportModalMode,
+  batchDetail?.batch?.id,
+  batchDetail?.batch?.run_status,
+  selectedBatch?.id,
+  selectedBatch?.run_status,
+  reportForm.batch_id,
+])
 
 useEffect(() => {
   setPage(1)
@@ -382,6 +438,8 @@ useEffect(() => {
   const canMarkBatchComplete =
     reportModalMode === 'edit' &&
     (batchRunStatus === 'stopped' || batchRunStatus === 'pending')
+  const markCompleteDisabled =
+    markCompleteLoading || markCompleteEligibility.loading || !markCompleteEligibility.allowed
   const reportModalBatch = batchDetail?.batch || selectedBatch || null
   const reportModalEntryDate = reportModalBatch?.date || null
   const reportModalLastModified = reportModalBatch?.last_modified_at || reportModalBatch?.created_at || null
@@ -480,6 +538,14 @@ useEffect(() => {
       setReportError('Batch not selected.')
       return
     }
+    if (markCompleteEligibility.loading) {
+      setReportError('Validating raw material stock. Please wait.')
+      return
+    }
+    if (!markCompleteEligibility.allowed) {
+      setReportError(markCompleteEligibility.detail || 'Insufficient raw material stock.')
+      return
+    }
 
     setReportError('')
     setMarkCompleteLoading(true)
@@ -496,7 +562,13 @@ useEffect(() => {
       }
       await loadBatches()
       loadCurrentMonthSummary()
-      setSuccessMsg('Batch marked as complete. You can now enter bag details.')
+      const warning = String(data?.warning || updatedBatch?.rm_shortage_detail || '').trim()
+      if (warning) {
+        setReportError(warning)
+        setSuccessMsg('Batch marked as complete with stock warning.')
+      } else {
+        setSuccessMsg('Batch marked as complete. You can now enter bag details.')
+      }
     } catch (err) {
       const detail = err?.response?.data?.detail || 'Unable to mark batch as complete.'
       setReportError(detail)
@@ -1678,14 +1750,23 @@ disabled
                 <button
                   type="button"
                   onClick={handleMarkBatchComplete}
-                  disabled={markCompleteLoading}
-                  className="px-3 py-2 rounded-lg bg-[#245658] text-white text-xs font-semibold disabled:opacity-60"
+                  disabled={markCompleteDisabled}
+                  className="px-3 py-2 rounded-lg bg-[#245658] text-white text-xs font-semibold disabled:opacity-60 disabled:bg-gray-400 disabled:cursor-not-allowed"
                 >
-                  {markCompleteLoading ? 'Marking...' : 'Mark As Complete'}
+                  {markCompleteLoading
+                    ? 'Marking...'
+                    : markCompleteEligibility.loading
+                    ? 'Checking RM...'
+                    : 'Mark As Complete'}
                 </button>
                 <p className="text-xs text-gray-600 mt-1">
                   Current utilized count ({reportModalBatch?.completed_count ?? 0}) will be kept.
                 </p>
+                {!markCompleteEligibility.allowed && (
+                  <p className="text-xs text-amber-700 mt-1 whitespace-pre-line">
+                    {markCompleteEligibility.detail || 'Raw material stock is insufficient.'}
+                  </p>
+                )}
               </div>
             )}
             <div className="bg-gray-100 border border-gray-300 rounded-lg p-3 mb-3">

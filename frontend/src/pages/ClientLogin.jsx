@@ -1,26 +1,47 @@
 import { useState, useEffect } from "react";
-import client from "./assets/login.png"
+import client from "./assets/login.png";
 import { useNavigate } from "react-router-dom";
+import { auth } from "../api/client";
+import { useAuth } from "../context/AuthContext";
+
 export default function ClientLogin() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 900);
-const navigate = useNavigate();
+  const navigate = useNavigate();
+  const { login } = useAuth();
+
   useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth < 900);
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  const handleLogin = (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
+    setLoading(true);
+    setError("");
 
-    if (email === "client@gmail.com" && password === "open@123") {
-      setError("");
-        navigate("/layout",{replace:true});
-    } else {
-      setError("Invalid email or password");
+    try {
+      const { data } = await auth.login(email, password);
+      if (String(data?.user?.role || "").toLowerCase() !== "customer") {
+        setError("This login is for customers only.");
+        setLoading(false);
+        return;
+      }
+      login(data?.access_token, data?.user);
+      navigate("/layout", { replace: true });
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      setError(
+        typeof detail === "string" && detail.trim()
+          ? detail
+          : "Invalid email or password"
+      );
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -74,6 +95,7 @@ const navigate = useNavigate();
     fontSize: 16,
     cursor: "pointer",
     marginTop: 10,
+    opacity: loading ? 0.7 : 1,
   };
 
   const rightStyle = {
@@ -148,7 +170,9 @@ const navigate = useNavigate();
               <p style={{ color: "#ff6b6b", marginBottom: 10 }}>{error}</p>
             )}
 
-            <button style={buttonStyle}>Access Dashboard</button>
+            <button style={buttonStyle} disabled={loading}>
+              {loading ? "Signing In..." : "Access Dashboard"}
+            </button>
           </form>
         </div>
       </div>

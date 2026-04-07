@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import random
 import threading
 import time
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
 from ..models.plc import MachineState, PLCDataSnapshot
-from .production_runtime import sync_active_batch_progress, try_post_batch_stock
+from .production_runtime import sync_active_batch_progress
 
 MACHINE_STATE_ID = 1
 
@@ -34,6 +35,7 @@ BASE_STATE = {
 _writer_lock = threading.Lock()
 _writer_thread: threading.Thread | None = None
 _ensure_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 def _next_val(prev: float, low: float, high: float, step: float) -> float:
@@ -212,7 +214,7 @@ def run_plc_simulation(interval_seconds: int = 5):
                     _insert_snapshot(session, state=state, recorded_at=datetime.utcnow())
                 session.commit()
         except Exception:
-            pass
+            logger.exception("PLC simulation loop failed")
         time.sleep(max(1, interval_seconds))
 
 
@@ -221,15 +223,11 @@ def _background_writer_loop(interval_seconds: int, lookback_minutes: int) -> Non
         try:
             with SessionLocal() as session:
                 machine_state = get_or_create_machine_state(session)
-                synced_batch = sync_active_batch_progress(
-                    session, machine_state=machine_state
-                )
-                if synced_batch:
-                    try_post_batch_stock(session, batch=synced_batch, client_id=1)
+                sync_active_batch_progress(session, machine_state=machine_state)
                 ensure_plc_live_data(session, minutes=lookback_minutes)
                 session.commit()
         except Exception:
-            pass
+            logger.exception("PLC background writer loop failed")
         time.sleep(max(1, interval_seconds))
 
 

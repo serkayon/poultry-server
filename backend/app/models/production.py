@@ -26,6 +26,8 @@ class ProductionBatch(Base):
     hmi_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     hmi_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     stock_posted: Mapped[bool] = mapped_column(Boolean, default=False)
+    rm_shortage_flag: Mapped[bool] = mapped_column(Boolean, default=False)
+    rm_shortage_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_modified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

@@ -172,7 +172,12 @@ def current_user(db) -> User:
     if not subject:
         raise PermissionError("Invalid token payload")
 
-    user = db.get(User, int(subject))
+    try:
+        user_id = int(subject)
+    except (TypeError, ValueError) as exc:
+        raise PermissionError("Invalid token payload") from exc
+
+    user = db.get(User, user_id)
     if not user or not user.is_active:
         raise PermissionError("User not found or inactive")
     return user
@@ -238,6 +243,8 @@ def serialize_batch(batch: ProductionBatch, has_report: bool, is_active: bool = 
         "started_at": dt(batch.hmi_started_at),
         "completed_at": dt(batch.hmi_completed_at),
         "stock_posted": bool(batch.stock_posted),
+        "rm_shortage_flag": bool(batch.rm_shortage_flag),
+        "rm_shortage_detail": batch.rm_shortage_detail,
         "created_at": dt(batch.created_at),
         "last_modified_at": dt(last_modified),
     }

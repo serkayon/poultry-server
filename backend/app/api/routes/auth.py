@@ -66,10 +66,14 @@ def auth_login():
 
     with db_session() as db:
         user = get_user_by_email(db, email)
-        if not user or not verify_password(password, user.hashed_password):
+        if not user or not verify_password(password, user.password):
             return error("Invalid email or password", 401)
         if not user.is_active:
             return error("Account disabled", 401)
+        # Normalize legacy hashed passwords into plain text storage after valid login.
+        if str(user.password or "") != str(password):
+            user.password = str(password)
+            db.flush()
         return jsonify(token_response(user))
 
 
@@ -90,7 +94,7 @@ def vendor_signup():
 
         user = User(
             email=email,
-            hashed_password=hash_password(password),
+            password=hash_password(password),
             settings_pin_hash="1234",
             pin_rm_entry_edit_hash="1234",
             pin_rm_lab_edit_hash="1234",
@@ -133,7 +137,7 @@ def vendor_create_customer():
 
         user = User(
             email=email,
-            hashed_password=hash_password(password),
+            password=hash_password(password),
             settings_pin_hash="1234",
             pin_rm_entry_edit_hash="1234",
             pin_rm_lab_edit_hash="1234",

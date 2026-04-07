@@ -12,11 +12,17 @@ from ..common import (
 from ...models.raw_material import RawMaterialType
 from ...models.stock import FeedStock, RMStockLedger
 from ...utils.export import (
-    export_multi_table_to_excel,
-    export_multi_table_to_pdf,
+    export_feed_individual_stock_report_excel,
+    export_feed_individual_stock_report_pdf,
+    export_feed_stock_report_excel,
+    export_feed_stock_report_pdf,
+    export_overall_stock_report_excel,
+    export_overall_stock_report_pdf,
+    export_rm_individual_stock_report_excel,
+    export_rm_individual_stock_report_pdf,
+    export_rm_stock_report_excel,
+    export_rm_stock_report_pdf,
     export_table_to_csv,
-    export_table_to_excel,
-    export_table_to_pdf,
 )
 
 stock_bp = Blueprint("stock", __name__, url_prefix="/api/stock")
@@ -253,18 +259,6 @@ def feed_summary():
 
     if not out:
         out = [
-            {
-                "feed_type": "Layer Feed",
-                "bag_weight_kg": None,
-                "feed_variant": "Layer Feed",
-                "quantity": 0,
-            },
-            {
-                "feed_type": "Broiler Starter",
-                "bag_weight_kg": None,
-                "feed_variant": "Broiler Starter",
-                "quantity": 0,
-            },
         ]
     return jsonify(out)
 
@@ -310,12 +304,12 @@ def download_rm_stock():
         )
     if file_format in ("excel", "xlsx"):
         return Response(
-            export_table_to_excel("RM Stock", headers, data_rows),
+            export_rm_stock_report_excel(headers, data_rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": "attachment; filename=rm_stock.xlsx"},
         )
     return Response(
-        export_table_to_pdf("RM Stock", headers, data_rows),
+        export_rm_stock_report_pdf(headers, data_rows),
         mimetype="application/pdf",
         headers={"Content-Disposition": "attachment; filename=rm_stock.pdf"},
     )
@@ -363,14 +357,88 @@ def download_rm_stock_summary():
         )
     if file_format in ("excel", "xlsx"):
         return Response(
-            export_table_to_excel("Individual Raw Material Stock", headers, data_rows),
+            export_rm_individual_stock_report_excel(headers, data_rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": "attachment; filename=rm_individual_stock.xlsx"},
         )
     return Response(
-        export_table_to_pdf("Individual Raw Material Stock", headers, data_rows),
+        export_rm_individual_stock_report_pdf(headers, data_rows),
         mimetype="application/pdf",
         headers={"Content-Disposition": "attachment; filename=rm_individual_stock.pdf"},
+    )
+
+
+@stock_bp.get("/download/feed-summary")
+def download_feed_stock_summary():
+    file_format = request.args.get("format", "pdf").lower()
+
+    with db_session() as db:
+        rows = db.execute(
+            select(
+                FeedStock.feed_type,
+                FeedStock.bag_weight_grams,
+                FeedStock.closing_stock,
+                FeedStock.date,
+            )
+            .where(FeedStock.client_id == DEFAULT_CLIENT_ID)
+            .order_by(FeedStock.feed_type, FeedStock.bag_weight_grams, FeedStock.date.desc())
+        ).all()
+
+    seen: set[tuple[str, int | None]] = set()
+    grouped: dict[str, dict] = {}
+    for feed_type, bag_weight_grams, closing_stock, _ in rows:
+        variant_key = (str(feed_type or "").strip(), bag_weight_grams)
+        if variant_key in seen:
+            continue
+        seen.add(variant_key)
+
+        feed_name = variant_key[0]
+        if not feed_name:
+            continue
+        qty = float(closing_stock or 0)
+        bag_kg = _bag_weight_kg(bag_weight_grams)
+
+        if feed_name not in grouped:
+            grouped[feed_name] = {"total": 0.0, "mix": []}
+        grouped[feed_name]["total"] += qty
+        if bag_kg is not None and bag_kg > 0:
+            grouped[feed_name]["mix"].append((bag_kg, qty))
+
+    def _mix_label(mix_rows: list[tuple[float, float]]) -> str:
+        if not mix_rows:
+            return "N/A"
+        chunks: list[str] = []
+        for bag_kg, qty in sorted(mix_rows, key=lambda item: item[0]):
+            bags = qty / bag_kg if bag_kg > 0 else 0.0
+            chunks.append(f"{bag_kg:g}kg: {bags:.2f} bags ({qty:.2f} kg)")
+        return " | ".join(chunks)
+
+    headers = ["Feed Type", "Bag Size Mix", "Available Stock (kg)"]
+    data_rows = [
+        (
+            feed_name,
+            _mix_label(grouped[feed_name]["mix"]),
+            round(float(grouped[feed_name]["total"]), 3),
+        )
+        for feed_name in sorted(grouped.keys())
+    ]
+
+    if file_format == "csv":
+        return Response(
+            export_table_to_csv(headers, data_rows),
+            mimetype="text/csv",
+            headers={"Content-Disposition": "attachment; filename=feed_individual_stock.csv"},
+        )
+    if file_format in ("excel", "xlsx"):
+        return Response(
+            export_feed_individual_stock_report_excel(headers, data_rows),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=feed_individual_stock.xlsx"},
+        )
+    return Response(
+        export_feed_individual_stock_report_pdf(headers, data_rows),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=feed_individual_stock.pdf"},
     )
 
 
@@ -417,12 +485,12 @@ def download_feed_stock():
         )
     if file_format in ("excel", "xlsx"):
         return Response(
-            export_table_to_excel("Feed Stock", headers, data_rows),
+            export_feed_stock_report_excel(headers, data_rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": "attachment; filename=feed_stock.xlsx"},
         )
     return Response(
-        export_table_to_pdf("Feed Stock", headers, data_rows),
+        export_feed_stock_report_pdf(headers, data_rows),
         mimetype="application/pdf",
         headers={"Content-Disposition": "attachment; filename=feed_stock.pdf"},
     )
@@ -435,76 +503,91 @@ def download_overall_stock():
         return error("format must be one of: pdf, excel, xlsx")
 
     with db_session() as db:
-        rm_rows = (
+        rm_types = (
+            db.execute(select(RawMaterialType).order_by(RawMaterialType.name.asc()))
+            .scalars()
+            .all()
+        )
+        rm_ledger_rows = (
             db.execute(
                 select(RMStockLedger)
                 .where(RMStockLedger.client_id == DEFAULT_CLIENT_ID)
-                .order_by(RMStockLedger.date.desc())
-            )
-            .scalars()
-            .all()
-        )
-        feed_rows = (
-            db.execute(
-                select(FeedStock)
-                .where(FeedStock.client_id == DEFAULT_CLIENT_ID)
-                .order_by(FeedStock.date.desc())
+                .order_by(RMStockLedger.date.desc(), RMStockLedger.id.desc())
             )
             .scalars()
             .all()
         )
 
-    rm_headers = ["Date", "RM Name", "Opening", "Received", "Consumption", "Closing"]
-    rm_data_rows = [
-        (
-            row.date.strftime("%Y-%m-%d"),
-            row.rm_name,
-            row.opening_stock,
-            row.received,
-            row.consumption,
-            row.closing_stock,
-        )
-        for row in rm_rows
-    ]
+        feed_rows = db.execute(
+            select(
+                FeedStock.feed_type,
+                FeedStock.bag_weight_grams,
+                FeedStock.closing_stock,
+                FeedStock.date,
+            )
+            .where(FeedStock.client_id == DEFAULT_CLIENT_ID)
+            .order_by(FeedStock.feed_type, FeedStock.bag_weight_grams, FeedStock.date.desc())
+        ).all()
 
-    feed_headers = ["Date", "Feed Type", "Bag Weight (kg)", "Variant", "Opening", "Produced", "Dispatched", "Closing"]
+    latest_rm_by_name: dict[str, float] = {}
+    for row in rm_ledger_rows:
+        name = str(row.rm_name or "").strip()
+        if not name or name in latest_rm_by_name:
+            continue
+        latest_rm_by_name[name] = float(row.closing_stock or 0)
+
+    ordered_rm_names = [item.name for item in rm_types]
+    known_rm_names = set(ordered_rm_names)
+    for name in latest_rm_by_name:
+        if name not in known_rm_names:
+            ordered_rm_names.append(name)
+
+    rm_headers = ["RM Type", "Available Stock (kg)"]
+    rm_data_rows = [(name, latest_rm_by_name.get(name, 0.0)) for name in ordered_rm_names]
+
+    seen_feed_variant: set[tuple[str, int | None]] = set()
+    feed_available_by_type: dict[str, float] = {}
+    for feed_type, bag_weight_grams, closing_stock, _ in feed_rows:
+        normalized_feed_type = str(feed_type or "").strip()
+        if not normalized_feed_type:
+            continue
+        variant_key = (normalized_feed_type, bag_weight_grams)
+        if variant_key in seen_feed_variant:
+            continue
+        seen_feed_variant.add(variant_key)
+        feed_available_by_type[normalized_feed_type] = (
+            feed_available_by_type.get(normalized_feed_type, 0.0) + float(closing_stock or 0)
+        )
+
+    feed_headers = ["Feed Type", "Available Stock (kg)"]
     feed_data_rows = [
-        (
-            row.date.strftime("%Y-%m-%d"),
-            row.feed_type,
-            _bag_weight_kg(row.bag_weight_grams) or "",
-            _feed_variant_name(row.feed_type, row.bag_weight_grams),
-            row.opening_stock,
-            row.produced,
-            row.dispatched,
-            row.closing_stock,
-        )
-        for row in feed_rows
+        (feed_type, round(feed_available_by_type[feed_type], 3))
+        for feed_type in sorted(feed_available_by_type.keys())
     ]
 
     sections = [
         {
-            "title": "Raw Material Stock",
+            "title": "Raw Material Available Stock",
             "headers": rm_headers,
             "rows": rm_data_rows,
-            "sheet_name": "RM Stock",
+            "sheet_name": "RM Available",
         },
         {
-            "title": "Feed Stock",
+            "title": "Feed Available Stock",
             "headers": feed_headers,
             "rows": feed_data_rows,
-            "sheet_name": "Feed Stock",
+            "sheet_name": "Feed Available",
         },
     ]
 
     if file_format in ("excel", "xlsx"):
         return Response(
-            export_multi_table_to_excel("Overall Stock Report", sections),
+            export_overall_stock_report_excel(sections),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": "attachment; filename=overall_stock_report.xlsx"},
         )
     return Response(
-        export_multi_table_to_pdf("Overall Stock Report", sections),
+        export_overall_stock_report_pdf(sections),
         mimetype="application/pdf",
         headers={"Content-Disposition": "attachment; filename=overall_stock_report.pdf"},
     )

@@ -21,11 +21,11 @@ from ...models.raw_material import RawMaterialEntry, RawMaterialLabReport, RawMa
 from ...models.stock import RMStockLedger
 from ...services.stock import rebuild_rm_stock_ledger
 from ...utils.export import (
-    export_multi_table_to_excel,
-    export_multi_table_to_pdf,
+    export_raw_material_entry_report_excel,
+    export_raw_material_entry_report_pdf,
+    export_raw_material_report_excel,
+    export_raw_material_report_pdf,
     export_table_to_csv,
-    export_table_to_excel,
-    export_table_to_pdf,
 )
 
 raw_material_bp = Blueprint("raw_material", __name__, url_prefix="/api/raw-material")
@@ -531,12 +531,12 @@ def download_raw_material():
         )
     if file_format in ("excel", "xlsx"):
         return Response(
-            export_table_to_excel("Raw Material Report", headers, rows),
+            export_raw_material_report_excel(headers, rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": "attachment; filename=raw_material_report.xlsx"},
         )
     return Response(
-        export_table_to_pdf("Raw Material Report", headers, rows),
+        export_raw_material_report_pdf(headers, rows),
         mimetype="application/pdf",
         headers={"Content-Disposition": "attachment; filename=raw_material_report.pdf"},
     )
@@ -626,19 +626,13 @@ def download_raw_material_entry(entry_id: int):
 
     filename = f"raw_material_entry_{entry_id}_report"
     if file_format in ("excel", "xlsx"):
-        excel_rows = details_rows + [("", "")] + [("Lab Report", "")] + lab_rows
         return Response(
-            export_table_to_excel(
-                "Raw Material Entry Report",
-                ["Field / Parameter", "Value"],
-                excel_rows,
-                sheet_name="Entry Report",
-            ),
+            export_raw_material_entry_report_excel(sections),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"},
         )
     return Response(
-        export_multi_table_to_pdf("Raw Material Entry Report", sections),
+        export_raw_material_entry_report_pdf(sections),
         mimetype="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}.pdf"},
     )

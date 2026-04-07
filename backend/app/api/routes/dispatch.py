@@ -18,7 +18,13 @@ from ...models.config import ProductType
 from ...models.dispatch import DispatchEntry, DispatchProduct
 from ...models.stock import FeedStock
 from ...services.stock import add_feed_dispatched, rebuild_feed_stock_ledger
-from ...utils.export import export_table_to_csv, export_table_to_excel, export_table_to_pdf
+from ...utils.export import (
+    export_dispatch_entry_report_excel,
+    export_dispatch_entry_report_pdf,
+    export_dispatch_report_excel,
+    export_dispatch_report_pdf,
+    export_table_to_csv,
+)
 from ...utils.invoice import generate_invoice_pdf
 
 dispatch_bp = Blueprint("dispatch", __name__, url_prefix="/api/dispatch")
@@ -458,12 +464,12 @@ def download_dispatch():
         )
     if file_format in ("excel", "xlsx"):
         return Response(
-            export_table_to_excel("Dispatch Report", headers, data_rows),
+            export_dispatch_report_excel(headers, data_rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": "attachment; filename=dispatch_report.xlsx"},
         )
     return Response(
-        export_table_to_pdf("Dispatch Report", headers, data_rows),
+        export_dispatch_report_pdf(headers, data_rows),
         mimetype="application/pdf",
         headers={"Content-Disposition": "attachment; filename=dispatch_report.pdf"},
     )
@@ -527,12 +533,12 @@ def download_single_dispatch_entry(entry_id: int):
         )
     if file_format in ("excel", "xlsx"):
         return Response(
-            export_table_to_excel("Dispatch Entry Report", headers, data_rows),
+            export_dispatch_entry_report_excel(headers, data_rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"},
         )
     return Response(
-        export_table_to_pdf("Dispatch Entry Report", headers, data_rows),
+        export_dispatch_entry_report_pdf(headers, data_rows),
         mimetype="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}.pdf"},
     )

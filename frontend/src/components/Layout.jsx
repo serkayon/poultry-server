@@ -29,6 +29,7 @@ export default function Layout() {
   const [batchNotifications, setBatchNotifications] = useState([])
   const knownBatchIdsRef = useRef(new Set())
   const completedReminderIdsRef = useRef(new Set())
+  const shortageReminderIdsRef = useRef(new Set())
   const initializedRef = useRef(false)
 const [isScrolled, setIsScrolled] = useState(false)
 const mainRef = useRef(null)
@@ -74,6 +75,17 @@ useEffect(() => {
               .filter((b) => (b.run_status || '').toLowerCase() === 'completed')
               .map((b) => b.id)
           )
+          shortageReminderIdsRef.current = new Set(
+            data
+              .filter(
+                (b) =>
+                  ['running', 'completed', 'stopped'].includes(
+                    (b.run_status || '').toLowerCase()
+                  ) &&
+                  Boolean(b.rm_shortage_flag)
+              )
+              .map((b) => b.id)
+          )
           initializedRef.current = true
           return
         }
@@ -84,6 +96,8 @@ useEffect(() => {
           const batchNo = batch?.batch_no || batchId
           const productName = String(batch?.product_name || '').trim()
           const runStatus = String(batch?.run_status || '').toLowerCase()
+          const hasShortage = Boolean(batch?.rm_shortage_flag)
+          const shortageDetail = String(batch?.rm_shortage_detail || '').replace(/\s+/g, ' ').trim()
           const needsDetails = !productName || !batch?.has_report
 
           if (!knownBatchIdsRef.current.has(batchId)) {
@@ -105,6 +119,23 @@ useEffect(() => {
               'warning'
             )
             completedReminderIdsRef.current.add(batchId)
+          }
+
+          if (
+            ['running', 'completed', 'stopped'].includes(runStatus) &&
+            hasShortage &&
+            !shortageReminderIdsRef.current.has(batchId)
+          ) {
+            const statusLabel = runStatus || 'running'
+            pushNotification(
+              shortageDetail
+                ? `Batch ${batchNo} is ${statusLabel} with RM shortage. ${shortageDetail}`
+                : `Batch ${batchNo} is ${statusLabel} with insufficient raw material stock.`,
+              'warning'
+            )
+            shortageReminderIdsRef.current.add(batchId)
+          } else if (!hasShortage) {
+            shortageReminderIdsRef.current.delete(batchId)
           }
         })
       } catch {

@@ -22,10 +22,12 @@ from ...models.plc import PLCDataSnapshot
 from ...models.production import ProductionBatch, ProductionBatchMaterial, ProductionReport
 from ...services.plc_simulator import ensure_plc_live_data, get_or_create_machine_state
 from ...services.production_runtime import (
+    evaluate_mark_complete_eligibility,
     RUN_STATUS_COMPLETED,
     RUN_STATUS_PENDING,
     RUN_STATUS_RUNNING,
     RUN_STATUS_STOPPED,
+    finalize_batch_runtime_state,
     normalize_batch_count,
     sync_active_batch_progress,
     try_post_batch_stock,
@@ -34,49 +36,22 @@ from ...services.stock import (
     add_feed_produced,
     add_rm_consumption,
     calculate_rm_consumption_quantity,
+    collect_rm_shortages,
+    format_rm_shortage_message,
     rebuild_rm_stock_ledger,
     resolve_effective_batch_run_count,
-    _latest_rm_closing,
-    _start_of_day,
 )
 from ...utils.export import (
+    export_batch_consumption_report_excel,
+    export_batch_consumption_report_pdf,
+    export_batch_report_excel,
     export_batch_report_pdf,
-    export_multi_table_to_excel,
-    export_multi_table_to_pdf,
+    export_production_report_excel,
+    export_production_report_pdf,
     export_table_to_csv,
-    export_table_to_excel,
-    export_table_to_pdf,
 )
 
 production_bp = Blueprint("production", __name__, url_prefix="/api/production")
-
-
-def _get_rm_available_stock(db, client_id, rm_name, quantity, date):
-    """Get available raw material stock. Returns tuple (available_qty, is_insufficient)."""
-    from ...models.stock import RMStockLedger
-    from sqlalchemy import select
-    
-    day = _start_of_day(date)
-    row = db.execute(
-        select(RMStockLedger).where(
-            RMStockLedger.client_id == client_id,
-            RMStockLedger.rm_name == rm_name,
-            RMStockLedger.date == day,
-        )
-    ).scalars().one_or_none()
-    
-    if row:
-        available = (
-            float(row.opening_stock or 0)
-            + float(row.received or 0)
-            - float(row.consumption or 0)
-        )
-    else:
-        available = _latest_rm_closing(db=db, client_id=client_id, rm_name=rm_name, day=day)
-    
-    required = float(quantity)
-    is_insufficient = required > available
-    return available, is_insufficient
 
 
 def _parse_batch_no(raw_value: object, fallback: str | None = None) -> str:
@@ -285,9 +260,7 @@ def list_batches():
 
     with db_session() as db:
         machine_state = get_or_create_machine_state(db)
-        synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
-        if synced_batch:
-            try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
+        sync_active_batch_progress(db, machine_state=machine_state)
         active_batch_id = machine_state.active_batch_id
 
         query = select(ProductionBatch).where(ProductionBatch.client_id == DEFAULT_CLIENT_ID)
@@ -336,9 +309,7 @@ def list_batches_by_period(period: str, product_name: str):
 
     with db_session() as db:
         machine_state = get_or_create_machine_state(db)
-        synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
-        if synced_batch:
-            try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
+        sync_active_batch_progress(db, machine_state=machine_state)
         active_batch_id = machine_state.active_batch_id
 
         query = select(ProductionBatch).where(ProductionBatch.client_id == DEFAULT_CLIENT_ID)
@@ -381,9 +352,7 @@ def summarize_batches_by_period(period: str, product_name: str):
 
     with db_session() as db:
         machine_state = get_or_create_machine_state(db)
-        synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
-        if synced_batch:
-            try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
+        sync_active_batch_progress(db, machine_state=machine_state)
 
         query = select(ProductionBatch).where(ProductionBatch.client_id == DEFAULT_CLIENT_ID)
         query = query.where(ProductionBatch.date >= from_date)
@@ -467,36 +436,15 @@ def create_batch():
         except ValueError as exc:
             return error(str(exc))
 
-        # Validate stock availability BEFORE creating batch
-        insufficient_materials = []
-        for material in materials:
-            required_quantity = calculate_rm_consumption_quantity(
-                material["quantity"],
-                batch_size_value,
-            )
-            available, is_insufficient = _get_rm_available_stock(
-                db=db,
-                client_id=DEFAULT_CLIENT_ID,
-                rm_name=material["rm_name"],
-                quantity=required_quantity,
-                date=date,
-            )
-            if is_insufficient:
-                insufficient_materials.append(
-                    (
-                        f"{material['rm_name']} "
-                        f"(required: {required_quantity}, "
-                        f"weight/batch: {material['quantity']}, "
-                        f"batch_count: {batch_size_value}, "
-                        f"available: {available})"
-                    )
-                )
-        
-        if insufficient_materials:
-            error_msg = "Insufficient raw material stock:\n" + "\n".join(
-                f"- {item}" for item in insufficient_materials
-            )
-            return error(error_msg)
+        shortages = collect_rm_shortages(
+            db=db,
+            client_id=DEFAULT_CLIENT_ID,
+            date=date,
+            materials=materials,
+            batch_run_count=batch_size_value,
+        )
+        if shortages:
+            return error(format_rm_shortage_message(shortages))
 
         try:
             now = datetime.utcnow()
@@ -518,6 +466,8 @@ def create_batch():
                 hmi_started_at=now,
                 hmi_completed_at=now,
                 stock_posted=False,
+                rm_shortage_flag=False,
+                rm_shortage_detail=None,
                 last_modified_at=now,
             )
         except ValueError as exc:
@@ -612,6 +562,8 @@ def create_hmi_batch():
                 hmi_started_at=None,
                 hmi_completed_at=None,
                 stock_posted=False,
+                rm_shortage_flag=False,
+                rm_shortage_detail=None,
                 last_modified_at=datetime.utcnow(),
             )
             db.add(batch)
@@ -656,6 +608,23 @@ def start_hmi_batch():
                 return error("A batch is already running. Stop it before starting a new batch.")
 
             recipe, product_name = _resolve_hmi_recipe_identity(db, recipe_id)
+            recipe_materials = _collect_recipe_material_payload(recipe)
+            projected_shortages = collect_rm_shortages(
+                db=db,
+                client_id=DEFAULT_CLIENT_ID,
+                date=date,
+                materials=recipe_materials,
+                batch_run_count=batch_count,
+            )
+            projected_shortage_detail = None
+            if projected_shortages:
+                projected_shortage_detail = format_rm_shortage_message(
+                    projected_shortages,
+                    heading=(
+                        "Batch is running but projected raw material is insufficient "
+                        f"for assigned count ({batch_count})"
+                    ),
+                )
 
             batch_no = batch_no_input or _suggest_next_hmi_batch_no(db)
             if _batch_no_exists(db, batch_no):
@@ -682,13 +651,15 @@ def start_hmi_batch():
                 hmi_started_at=now,
                 hmi_completed_at=None,
                 stock_posted=False,
+                rm_shortage_flag=bool(projected_shortage_detail),
+                rm_shortage_detail=projected_shortage_detail,
                 last_modified_at=now,
             )
             db.add(batch)
             db.flush()
 
             material_rows: list[ProductionBatchMaterial] = []
-            for material in _collect_recipe_material_payload(recipe):
+            for material in recipe_materials:
                 row = ProductionBatchMaterial(
                     batch_id=batch.id,
                     rm_name=material["rm_name"],
@@ -765,6 +736,19 @@ def mark_batch_complete(batch_id: int):
             return error("Active running batch cannot be marked complete. Stop it first.")
 
         status = (batch.hmi_status or "").strip().lower()
+        if status in {RUN_STATUS_PENDING, RUN_STATUS_STOPPED}:
+            eligible, detail = evaluate_mark_complete_eligibility(
+                db=db,
+                batch=batch,
+                client_id=DEFAULT_CLIENT_ID,
+            )
+            if not eligible:
+                batch.rm_shortage_flag = True
+                batch.rm_shortage_detail = detail
+                return error(detail or "Insufficient raw material stock for completion.")
+            batch.rm_shortage_flag = False
+            batch.rm_shortage_detail = None
+
         if status != RUN_STATUS_COMPLETED:
             now = datetime.utcnow()
             planned_count = normalize_batch_count(batch.batch_size)
@@ -779,7 +763,12 @@ def mark_batch_complete(batch_id: int):
             batch.hmi_status = RUN_STATUS_COMPLETED
             batch.last_modified_at = now
 
-        rebuild_rm_stock_ledger(db=db, client_id=DEFAULT_CLIENT_ID)
+        warning_detail = finalize_batch_runtime_state(
+            db=db,
+            batch=batch,
+            client_id=DEFAULT_CLIENT_ID,
+        )
+
         try_post_batch_stock(db, batch=batch, client_id=DEFAULT_CLIENT_ID)
         has_report = (
             db.execute(select(ProductionReport).where(ProductionReport.batch_id == batch.id))
@@ -788,24 +777,70 @@ def mark_batch_complete(batch_id: int):
             is not None
         )
         db.flush()
-        return jsonify(
-            {
-                "batch": serialize_batch(
-                    batch,
-                    has_report=has_report,
-                    is_active=batch.id == machine_state.active_batch_id,
+        response_payload = {
+            "batch": serialize_batch(
+                batch,
+                has_report=has_report,
+                is_active=batch.id == machine_state.active_batch_id,
+            )
+        }
+        if warning_detail:
+            response_payload["warning"] = (
+                "Batch finalized with stock warning. "
+                f"{warning_detail}"
+            )
+        return jsonify(response_payload)
+
+
+@production_bp.get("/batches/<int:batch_id>/mark-complete-eligibility")
+def get_mark_complete_eligibility(batch_id: int):
+    with db_session() as db:
+        machine_state = get_or_create_machine_state(db)
+        sync_active_batch_progress(db, machine_state=machine_state)
+
+        batch = (
+            db.execute(
+                select(ProductionBatch).where(
+                    ProductionBatch.id == batch_id,
+                    ProductionBatch.client_id == DEFAULT_CLIENT_ID,
                 )
-            }
+            )
+            .scalars()
+            .one_or_none()
         )
+        if not batch:
+            return error("Batch not found", 404)
+
+        if machine_state.active_batch_id == batch.id:
+            return jsonify(
+                {
+                    "allowed": False,
+                    "detail": "Active running batch cannot be marked complete. Stop it first.",
+                }
+            )
+
+        status = (batch.hmi_status or "").strip().lower()
+        if status not in {RUN_STATUS_PENDING, RUN_STATUS_STOPPED}:
+            return jsonify(
+                {
+                    "allowed": False,
+                    "detail": "Only pending/stopped batches can be marked complete.",
+                }
+            )
+
+        eligible, detail = evaluate_mark_complete_eligibility(
+            db=db,
+            batch=batch,
+            client_id=DEFAULT_CLIENT_ID,
+        )
+        return jsonify({"allowed": eligible, "detail": detail})
 
 
 @production_bp.get("/batches/<int:batch_id>")
 def get_batch(batch_id: int):
     with db_session() as db:
         machine_state = get_or_create_machine_state(db)
-        synced_batch = sync_active_batch_progress(db, machine_state=machine_state)
-        if synced_batch:
-            try_post_batch_stock(db, batch=synced_batch, client_id=DEFAULT_CLIENT_ID)
+        sync_active_batch_progress(db, machine_state=machine_state)
         batch = (
             db.execute(
                 select(ProductionBatch).where(
@@ -1127,6 +1162,7 @@ def consumption_report():
                 batch_size=batch.batch_size,
                 hmi_completed_count=batch.hmi_completed_count,
                 hmi_status=batch.hmi_status,
+                rm_shortage_flag=batch.rm_shortage_flag,
             )
             batch_rows = (
                 db.execute(
@@ -1250,16 +1286,16 @@ def download_production():
         )
     if file_format in ("excel", "xlsx"):
         return Response(
-            export_table_to_excel("Production Report", headers, data_rows),
+            export_production_report_excel(headers, data_rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": "attachment; filename=production_report.xlsx"},
         )
     return Response(
-        export_table_to_pdf("Production Report", headers, data_rows),
+        export_production_report_pdf(headers, data_rows),
         mimetype="application/pdf",
         headers={"Content-Disposition": "attachment; filename=production_report.pdf"},
     )
-# ðŸ”¥ DOWNLOAD SINGLE BATCH REPORT
+# Download single batch report
 @production_bp.get("/<int:batch_id>/download")
 def download_single_batch(batch_id: int):
     file_format = request.args.get("format", "pdf").lower()
@@ -1367,7 +1403,7 @@ def download_single_batch(batch_id: int):
 
     if file_format in ("excel", "xlsx"):
         return Response(
-            export_table_to_excel("Batch Report", headers, data_rows),
+            export_batch_report_excel(headers, data_rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"},
         )
@@ -1418,6 +1454,7 @@ def download_batch_consumption_report(batch_id: int):
         batch_size=batch.batch_size,
         hmi_completed_count=batch.hmi_completed_count,
         hmi_status=batch.hmi_status,
+        rm_shortage_flag=batch.rm_shortage_flag,
     )
     consumption_rows: list[tuple] = []
     total_weight_per_batch = 0.0
@@ -1477,13 +1514,13 @@ def download_batch_consumption_report(batch_id: int):
 
     if file_format in ("excel", "xlsx"):
         return Response(
-            export_multi_table_to_excel("Batch Consumption Report", sections),
+            export_batch_consumption_report_excel(sections),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"},
         )
 
     return Response(
-        export_multi_table_to_pdf("Batch Consumption Report", sections),
+        export_batch_consumption_report_pdf(sections),
         mimetype="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}.pdf"},
     )

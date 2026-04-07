@@ -245,6 +245,18 @@ export default function Stock() {
     })
   }
 
+  const downloadRmIndividual = (format) => {
+    stockApi.downloadRMIndividual(format).then(({ data }) => {
+      const ext = format === 'pdf' ? 'pdf' : 'xlsx'
+      const url = URL.createObjectURL(new Blob([data]))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `rm_individual_stock.${ext}`
+      a.click()
+      URL.revokeObjectURL(url)
+    })
+  }
+
   const downloadFeed = (format, rangeKey = feedRange) => {
     stockApi.downloadFeed(
       format,
@@ -255,6 +267,18 @@ export default function Stock() {
       const a = document.createElement('a')
       a.href = url
       a.download = `feed_stock.${ext}`
+      a.click()
+      URL.revokeObjectURL(url)
+    })
+  }
+
+  const downloadFeedIndividual = (format) => {
+    stockApi.downloadFeedIndividual(format).then(({ data }) => {
+      const ext = format === 'pdf' ? 'pdf' : 'xlsx'
+      const url = URL.createObjectURL(new Blob([data]))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `feed_individual_stock.${ext}`
       a.click()
       URL.revokeObjectURL(url)
     })
@@ -333,8 +357,8 @@ export default function Stock() {
               <p className="text-xs text-gray-500 mt-1">Latest closing stock by RM type</p>
             </div>
             <div className="flex gap-2 shrink-0">
-              <button onClick={() => downloadRm('pdf')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download PDF</button>
-              <button onClick={() => downloadRm('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download Excel</button>
+              <button onClick={() => downloadRmIndividual('pdf')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download PDF</button>
+              <button onClick={() => downloadRmIndividual('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download Excel</button>
             </div>
           </div>
           <div className="overflow-x-auto">
@@ -378,8 +402,8 @@ export default function Stock() {
               <p className="text-xs text-gray-500 mt-1">Latest closing stock by feed type (all bag sizes combined)</p>
             </div>
             <div className="flex gap-2 shrink-0">
-              <button onClick={() => downloadFeed('pdf')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download PDF</button>
-              <button onClick={() => downloadFeed('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download Excel</button>
+              <button onClick={() => downloadFeedIndividual('pdf')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download PDF</button>
+              <button onClick={() => downloadFeedIndividual('xlsx')} className="px-3 py-1.5 rounded-lg border border-gray-600 text-gray-800 text-sm hover:bg-primary-light">Download Excel</button>
             </div>
           </div>
           <div className="overflow-x-auto">

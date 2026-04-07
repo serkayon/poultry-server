@@ -82,15 +82,6 @@ export default function Dashboard() {
   const fixedTicks = (maxValue) =>
     Array.from({ length: 11 }, (_, idx) => (maxValue / 10) * idx);
 
-  const feedStockKey = (row) => {
-    const feedVariant = String(row?.feed_variant || "").trim();
-    if (feedVariant) return feedVariant;
-    const feedType = String(row?.feed_type || "").trim();
-    if (!feedType) return "";
-    const bagWeight = row?.bag_weight_kg == null ? "" : ` (${Number(row.bag_weight_kg)}kg/bag)`;
-    return `${feedType}${bagWeight}`;
-  };
-
   const sumLatestClosingByType = (rows, keySelector) => {
     const latestByKey = new Map();
     (rows || []).forEach((row) => {
@@ -112,13 +103,6 @@ export default function Dashboard() {
     return total;
   };
 
-  const sumLatestClosingByTypeForDay = (rows, keySelector, dayKey) => {
-    const dayRows = (rows || []).filter(
-      (row) => toDateInputIST(row?.date, "") === dayKey
-    );
-    return sumLatestClosingByType(dayRows, keySelector);
-  };
-
   //For Date and Time
   useEffect(() => {
     const t = setInterval(() => setDateTime(new Date()), 1000);
@@ -134,18 +118,20 @@ export default function Dashboard() {
       try {
         const [
           rmAllRes,
-          feedTodayRes,
+          feedSummaryRes,
           dispatchTodayRes,
           productionTodayRes,
         ] = await Promise.all([
           stockApi.rm(),
-          stockApi.feed({ date: today }),
+          stockApi.feedSummary(),
           dispatchApi.list({ from_date: fromDate, to_date: toDate }),
           productionApi.listBatches({ date: today }),
         ]);
 
         const rmAllRows = Array.isArray(rmAllRes?.data) ? rmAllRes.data : [];
-        const feedTodayRows = Array.isArray(feedTodayRes?.data) ? feedTodayRes.data : [];
+        const feedSummaryRows = Array.isArray(feedSummaryRes?.data)
+          ? feedSummaryRes.data
+          : [];
         const dispatchTodayRows = Array.isArray(dispatchTodayRes?.data)
           ? dispatchTodayRes.data
           : [];
@@ -158,10 +144,9 @@ export default function Dashboard() {
           (row) => row?.rm_name
         );
 
-        const finishedGoodsStockKg = sumLatestClosingByTypeForDay(
-          feedTodayRows,
-          feedStockKey,
-          today
+        const finishedGoodsStockKg = feedSummaryRows.reduce(
+          (sum, row) => sum + (Number(row?.quantity) || 0),
+          0
         );
 
         const currentDayDispatchKg = dispatchTodayRows
@@ -399,8 +384,8 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
       buttonBottom: "#7e1a12",
       texture: "url('/textures/chalk.png')",
       icon: largegoods,
-      download: () => stockApi.downloadFeed("pdf", todayRangeParams),
-      fileName: "finished_goods_current_day.pdf",
+      download: () => stockApi.downloadFeedIndividual("pdf"),
+      fileName: "finished_goods_available_stock.pdf",
     },
   ];
 

@@ -10,16 +10,22 @@ from ..models.user import User
 settings = get_settings()
 
 
-def _hash(password: str) -> str:
+def _legacy_hash(password: str) -> str:
     return hashlib.sha256((password + settings.secret_key).encode()).hexdigest()
 
 
 def hash_password(password: str) -> str:
-    return _hash(password)
+    # Passwords are now stored as plain text as requested.
+    return str(password)
 
 
-def verify_password(plain: str, hashed: str) -> bool:
-    return _hash(plain) == hashed
+def verify_password(plain: str, stored_value: str) -> bool:
+    plain_value = str(plain or "")
+    db_value = str(stored_value or "")
+    if plain_value == db_value:
+        return True
+    # Backward compatibility for legacy rows saved with salted SHA256.
+    return _legacy_hash(plain_value) == db_value
 
 
 def create_access_token(data: dict) -> str:
