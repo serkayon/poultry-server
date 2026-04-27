@@ -1,404 +1,427 @@
-"""Generate professional invoices as PDF - Classic Invoice Layout."""
-from datetime import datetime
+# Generate professional invoices as PDF — Navy/Gold theme matching production report.
+
+from datetime import datetime, date
 from io import BytesIO
+ 
+from reportlab.lib import colors
+from reportlab.lib.colors import HexColor
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch, cm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-from reportlab.pdfgen import canvas as canvas_module
-from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate
+from reportlab.lib.units import inch, mm
+from reportlab.platypus import (
+    HRFlowable, Image, Paragraph, SimpleDocTemplate,
+    Spacer, Table, TableStyle,
+)
+ 
+ 
+# Handle generate invoice pdf.
 
-
-TEAL = colors.HexColor('#245658')
-LIGHT_TEAL = colors.HexColor('#e8f4f4')
-LIGHT_GRAY = colors.HexColor('#f5f5f5')
-MID_GRAY = colors.HexColor('#cccccc')
-DARK_GRAY = colors.HexColor('#333333')
-WHITE = colors.white
-BLACK = colors.black
-
-
-def generate_invoice_pdf(dispatch_entry, products,
-                         company_name="SERKAYON FEED MILL",
-                         company_tagline="Industrail Inteligence",
-                         company_address="[Trichy,Tamil Nadu, India]",
-                         company_city="[620001]",
-                         company_phone="Phone (+91) 9876543210",
-                         company_fax="Fax (+91) 9876543210"):
+def generate_invoice_pdf(
+    dispatch_entry,
+    products,
+    company_name    = "SERKAYON FEED MILL",
+    company_tagline = "Industrial Intelligence",
+    company_address = "Trichy, Tamil Nadu, India",
+    company_city    = "620001",
+    company_phone   = "(+91) 9876543210",
+    company_fax     = "(+91) 9876543210",
+):
+    # ── Palette (navy/gold — same as production report) ───────────────────────
+    NAVY       = HexColor("#0D2545")
+    NAVY_LIGHT = HexColor("#1A3A6B")
+    GOLD       = HexColor("#C8922A")
+    GOLD_LIGHT = HexColor("#F5E6C8")
+    GOLD_BG    = HexColor("#FDF8EE")
+    GREY_DARK  = HexColor("#3D3D3D")
+    GREY_MID   = HexColor("#6B6B6B")
+    GREY_LIGHT = HexColor("#F2F4F7")
+    RULE       = HexColor("#D9DDE6")
+    WHITE      = HexColor("#FFFFFF")
+ 
+    # ── Document setup ────────────────────────────────────────────────────────
     buffer = BytesIO()
+    PAGE_W, PAGE_H = A4
+    MARGIN = 18 * mm
     doc = SimpleDocTemplate(
         buffer, pagesize=A4,
-        topMargin=0.5 * inch, bottomMargin=0.5 * inch,
-        leftMargin=0.6 * inch, rightMargin=0.6 * inch
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=MARGIN,  bottomMargin=MARGIN,
     )
-
+    W = doc.width   # usable width
     story = []
-    styles = getSampleStyleSheet()
-    W = 6.7 * inch  # usable width
+ 
+    # ── Style factory ─────────────────────────────────────────────────────────
 
-    def style(name, **kwargs):
-        base = styles['Normal']
-        return ParagraphStyle(name, parent=base, **kwargs)
+    def S(name, **kw):
+        base = getSampleStyleSheet()["Normal"]
+        return ParagraphStyle(name, parent=base, **kw)
+ 
+    # Handle safe.
 
-    # ─────────────────────────────────────────
-    # HEADER: Company Name  |  INVOICE
-    # ─────────────────────────────────────────
-    co_name_style = style('CoName', fontSize=16, fontName='Helvetica-Bold', textColor=DARK_GRAY)
-    co_tag_style  = style('CoTag',  fontSize=9,  fontName='Helvetica',      textColor=colors.grey)
-    inv_title_style = style('InvTitle', fontSize=22, fontName='Helvetica-Bold',
-                             textColor=TEAL, alignment=TA_RIGHT)
-
-    header_data = [[
-        [Paragraph(company_name, co_name_style),
-         Paragraph(company_tagline, co_tag_style)],
-        Paragraph("INVOICE", inv_title_style)
-    ]]
-    header_table = Table(header_data, colWidths=[W * 0.6, W * 0.4])
-    header_table.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, -1), 0),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-    ]))
-    story.append(header_table)
-
-    # Company address block under name
-    addr_style = style('Addr', fontSize=8, textColor=colors.grey, leading=12)
-    story.append(Paragraph(company_address, addr_style))
-    story.append(Paragraph(company_city, addr_style))
-    story.append(Paragraph(f"{company_phone}   Fax {company_fax}", addr_style))
-    story.append(Spacer(1, 0.15 * inch))
-
-    # ─────────────────────────────────────────
-    # DIVIDER
-    # ─────────────────────────────────────────
-    story.append(HRFlowable(width=W, thickness=1.5, color=TEAL, spaceAfter=6))
-
-    # ─────────────────────────────────────────
-    # TO / SHIP TO  +  Invoice # / Date
-    # ─────────────────────────────────────────
-    inv_date = (dispatch_entry.date.strftime("%B %d, %Y")
-                if hasattr(dispatch_entry.date, 'strftime')
+    def _safe(v, fallback="—"):
+        if v in (None, "", 0):
+            return fallback
+        return str(v)
+ 
+    # ── Derived values ────────────────────────────────────────────────────────
+    inv_date = (dispatch_entry.date.strftime("%d %B %Y")
+                if hasattr(dispatch_entry.date, "strftime")
                 else str(dispatch_entry.date))
-    inv_no = f"INV-{dispatch_entry.id:04d}"
-
-    label_s  = style('Lbl',  fontSize=8, fontName='Helvetica-Bold', textColor=TEAL)
-    value_s  = style('Val',  fontSize=9, fontName='Helvetica', leading=13)
-    meta_lbl = style('MLbl', fontSize=8, fontName='Helvetica-Bold', textColor=TEAL, alignment=TA_RIGHT)
-    meta_val = style('MVal', fontSize=9, fontName='Helvetica', alignment=TA_RIGHT)
-
-    # Build "TO" block
-    to_lines = [
-        Paragraph("TO:", label_s),
-        Paragraph(dispatch_entry.party_name, style('PName', fontSize=9, fontName='Helvetica-Bold')),
-    ]
-    if getattr(dispatch_entry, 'party_address', None):
-        to_lines.append(Paragraph(dispatch_entry.party_address, value_s))
-    if getattr(dispatch_entry, 'pincode', None):
-        to_lines.append(Paragraph(f"Pincode: {dispatch_entry.pincode}", value_s))
-    if getattr(dispatch_entry, 'party_phone', None):
-        to_lines.append(Paragraph(f"Phone: {dispatch_entry.party_phone}", value_s))
-
-    # Build "SHIP TO" block
-    ship_lines = [
-        Paragraph("SHIP TO:", label_s),
-        Paragraph(dispatch_entry.party_name, style('SName', fontSize=9, fontName='Helvetica-Bold')),
-    ]
-    if getattr(dispatch_entry, 'party_address', None):
-        ship_lines.append(Paragraph(dispatch_entry.party_address, value_s))
-    if getattr(dispatch_entry, 'pincode', None):
-        ship_lines.append(Paragraph(f"Pincode: {dispatch_entry.pincode}", value_s))
-    if getattr(dispatch_entry, 'party_phone', None):
-        ship_lines.append(Paragraph(f"Phone: {dispatch_entry.party_phone}", value_s))
-
-    # Build invoice meta block
-    meta_lines = [
-        [Paragraph("INVOICE #", meta_lbl), Paragraph(inv_no, meta_val)],
-        [Paragraph("DATE:", meta_lbl),    Paragraph(inv_date, meta_val)],
-    ]
-    meta_table = Table(meta_lines, colWidths=[1.1 * inch, 1.4 * inch])
-    meta_table.setStyle(TableStyle([
-        ('TOPPADDING', (0, 0), (-1, -1), 2),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-    ]))
-
-    addresses_data = [[to_lines, ship_lines, meta_table]]
-    addresses_table = Table(addresses_data, colWidths=[W * 0.33, W * 0.37, W * 0.3])
-    addresses_table.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, -1), 0),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    story.append(addresses_table)
-    story.append(Spacer(1, 0.12 * inch))
-
-    # ─────────────────────────────────────────
-    # COMMENTS / SPECIAL INSTRUCTIONS
-    # ─────────────────────────────────────────
-    if getattr(dispatch_entry, 'notes', None):
-        story.append(Paragraph(
-            f"<b>COMMENTS OR SPECIAL INSTRUCTIONS:</b> {dispatch_entry.notes}",
-            style('Notes', fontSize=8, textColor=DARK_GRAY)
-        ))
-        story.append(Spacer(1, 0.1 * inch))
-
-    # ─────────────────────────────────────────
-    # SALESPERSON / VEHICLE / DISPATCH INFO ROW
-    # ─────────────────────────────────────────
-    info_header = ['SALESPERSON', 'P.O. NUMBER', 'VEHICLE NO.', 'DISPATCH DATE', 'TERMS']
-    info_vals   = [
-        getattr(dispatch_entry, 'salesperson', ''),
-        getattr(dispatch_entry, 'po_number', ''),
-        getattr(dispatch_entry, 'vehicle_no', ''),
+    dispatch_code = str(getattr(dispatch_entry, "dispatch_code", "") or "").strip()
+    if not dispatch_code:
+        dispatch_code = "DPX00000"
+    inv_no   = f"INV-{dispatch_code}"
+ 
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SECTION 1 — HEADER BAR  (navy block with company + INVOICE badge)
+    # ══════════════════════════════════════════════════════════════════════════
+    # Left: white company name + gold tagline inside navy cell
+    # Right: "INVOICE" large + gold inv number
+ 
+    co_name_p = Paragraph(
+        company_name.upper(),
+        S("CN", fontSize=15, fontName="Helvetica-Bold", textColor=WHITE),
+    )
+    co_tag_p = Paragraph(
+        company_tagline,
+        S("CT", fontSize=8, fontName="Helvetica", textColor=GOLD_LIGHT, leading=12),
+    )
+    co_addr_p = Paragraph(
+        f"{company_address} · {company_city}",
+        S("CA", fontSize=7.5, textColor=HexColor("#AAC4D8"), leading=11),
+    )
+    co_phone_p = Paragraph(
+        f"Phone {company_phone}   |   Fax {company_fax}",
+        S("CP", fontSize=7.5, textColor=HexColor("#AAC4D8"), leading=11),
+    )
+ 
+    inv_lbl_p = Paragraph(
+        "INVOICE",
+        S("IL", fontSize=26, fontName="Helvetica-Bold", textColor=WHITE, alignment=TA_RIGHT),
+    )
+    inv_no_p = Paragraph(
+        inv_no,
+        S("IN", fontSize=10, fontName="Helvetica-Bold", textColor=GOLD, alignment=TA_RIGHT),
+    )
+    inv_date_p = Paragraph(
         inv_date,
-        getattr(dispatch_entry, 'terms', 'As Agreed'),
-    ]
-
-    info_col_w = [W / 5] * 5
-    info_table_data = [info_header, info_vals]
-    info_table = Table(info_table_data, colWidths=info_col_w)
-    info_table.setStyle(TableStyle([
-        # Header row
-        ('BACKGROUND',   (0, 0), (-1, 0), TEAL),
-        ('TEXTCOLOR',    (0, 0), (-1, 0), WHITE),
-        ('FONTNAME',     (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE',     (0, 0), (-1, 0), 8),
-        ('ALIGN',        (0, 0), (-1, 0), 'CENTER'),
-        ('TOPPADDING',   (0, 0), (-1, 0), 6),
-        ('BOTTOMPADDING',(0, 0), (-1, 0), 6),
-        # Data row
-        ('FONTSIZE',     (0, 1), (-1, 1), 8),
-        ('ALIGN',        (0, 1), (-1, 1), 'CENTER'),
-        ('TOPPADDING',   (0, 1), (-1, -1), 5),
-        ('BOTTOMPADDING',(0, 1), (-1, -1), 5),
-        ('BACKGROUND',   (0, 1), (-1, 1), LIGHT_GRAY),
-        # Border
-        ('GRID',         (0, 0), (-1, -1), 0.5, MID_GRAY),
-        ('BOX',          (0, 0), (-1, -1), 1,   TEAL),
+        S("ID", fontSize=8.5, textColor=GOLD_LIGHT, alignment=TA_RIGHT),
+    )
+ 
+    header_tbl = Table(
+        [[
+            [co_name_p, Spacer(1, 3), co_tag_p, Spacer(1, 5), co_addr_p, co_phone_p],
+            [inv_lbl_p, Spacer(1, 4), inv_no_p, inv_date_p],
+        ]],
+        colWidths=[W * 0.58, W * 0.42],
+    )
+    header_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), NAVY),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING",   (0, 0), (0, -1),  14),
+        ("RIGHTPADDING",  (0, 0), (0, -1),  8),
+        ("LEFTPADDING",   (1, 0), (1, -1),  8),
+        ("RIGHTPADDING",  (1, 0), (1, -1),  14),
+        ("TOPPADDING",    (0, 0), (-1, -1), 14),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
     ]))
-    story.append(info_table)
-    story.append(Spacer(1, 0.12 * inch))
+    story.append(header_tbl)
+ 
+    # Gold accent stripe under header
+    story.append(Table(
+        [[""]],
+        colWidths=[W],
+        rowHeights=[3],
+        style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), GOLD)]),
+    ))
+    story.append(Spacer(1, 6 * mm))
+ 
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SECTION 2 — BILL TO / SHIP TO  +  INVOICE META
+    # ══════════════════════════════════════════════════════════════════════════
+    lbl_s  = S("Lbl",  fontSize=7,   fontName="Helvetica-Bold", textColor=NAVY,      leading=10)
+    pname_s= S("PN",   fontSize=9.5, fontName="Helvetica-Bold", textColor=GREY_DARK, leading=13)
+    val_s  = S("Val",  fontSize=8.5, textColor=GREY_MID, leading=12)
+    mlbl_s = S("ML",   fontSize=7.5, fontName="Helvetica-Bold", textColor=GREY_MID,  alignment=TA_RIGHT)
+    mval_s = S("MV",   fontSize=8.5, fontName="Helvetica-Bold", textColor=NAVY,      alignment=TA_RIGHT)
+ 
+    # Handle addr block.
 
-    # ─────────────────────────────────────────
-    # LINE ITEMS TABLE
-    # ─────────────────────────────────────────
-    col_widths = [0.55 * inch, 2.5 * inch, 1.0 * inch, 1.3 * inch, 1.35 * inch]
-    item_headers = ['QTY\n(BAGS)', 'DESCRIPTION', 'WEIGHT/BAG\n(KG)', 'UNIT PRICE\n(per KG)', 'TOTAL']
-
-    items_data = [item_headers]
+    def _addr_block(heading, name, address=None, pincode=None, phone=None):
+        lines = [Paragraph(heading, lbl_s), Paragraph(name, pname_s)]
+        if address:  lines.append(Paragraph(address, val_s))
+        if pincode:  lines.append(Paragraph(f"Pin: {pincode}", val_s))
+        if phone:    lines.append(Paragraph(f"Ph: {phone}", val_s))
+        return lines
+ 
+    bill_block = _addr_block(
+        "BILL TO",
+        dispatch_entry.party_name,
+        getattr(dispatch_entry, "party_address", None),
+        getattr(dispatch_entry, "pincode",       None),
+        getattr(dispatch_entry, "party_phone",   None),
+    )
+    ship_block = _addr_block(
+        "SHIP TO",
+        dispatch_entry.party_name,
+        getattr(dispatch_entry, "party_address", None),
+        getattr(dispatch_entry, "pincode",       None),
+        getattr(dispatch_entry, "party_phone",   None),
+    )
+ 
+    # Invoice meta box (right column)
+    meta_rows = [
+        [Paragraph("INVOICE #",      mlbl_s), Paragraph(inv_no,   mval_s)],
+        [Paragraph("DATE",           mlbl_s), Paragraph(inv_date, mval_s)],
+        [Paragraph("P.O. NUMBER",    mlbl_s), Paragraph(_safe(getattr(dispatch_entry, "po_number", "")),   mval_s)],
+        [Paragraph("VEHICLE NO.",    mlbl_s), Paragraph(_safe(getattr(dispatch_entry, "vehicle_no", "")),  mval_s)],
+        [Paragraph("SALESPERSON",    mlbl_s), Paragraph(_safe(getattr(dispatch_entry, "salesperson", "")), mval_s)],
+        [Paragraph("PAYMENT TERMS",  mlbl_s), Paragraph(_safe(getattr(dispatch_entry, "terms", "As Agreed")), mval_s)],
+    ]
+    meta_t = Table(meta_rows, colWidths=[W * 0.16, W * 0.18])
+    meta_t.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), GOLD_BG),
+        ("LINEBELOW",     (0, 0), (-1, -2), 0.4, RULE),
+        ("BACKGROUND",    (0, -1), (-1, -1), GOLD_LIGHT),
+        ("LINEABOVE",     (0, -1), (-1, -1), 1.5, GOLD),
+        ("BOX",           (0, 0),  (-1, -1), 0.8, GOLD),
+        ("TOPPADDING",    (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 7),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+ 
+    addr_tbl = Table(
+        [[bill_block, ship_block, meta_t]],
+        colWidths=[W * 0.32, W * 0.34, W * 0.34],
+    )
+    addr_tbl.setStyle(TableStyle([
+        ("VALIGN",       (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING",  (0, 0), (1, -1),  0),
+        ("RIGHTPADDING", (0, 0), (1, -1),  10),
+        ("LEFTPADDING",  (2, 0), (2, -1),  0),
+        ("RIGHTPADDING", (2, 0), (2, -1),  0),
+        ("TOPPADDING",   (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 0),
+        ("LINEBEFORE",   (0, 0), (0, -1),  3, NAVY),
+        ("LINEBEFORE",   (1, 0), (1, -1),  3, GOLD),
+    ]))
+    story.append(addr_tbl)
+    story.append(Spacer(1, 5 * mm))
+ 
+    # ── Notes / Special Instructions ─────────────────────────────────────────
+    if getattr(dispatch_entry, "notes", None):
+        notes_tbl = Table(
+            [[Paragraph(
+                f"<b>SPECIAL INSTRUCTIONS:</b>  {dispatch_entry.notes}",
+                S("NT", fontSize=8, textColor=GREY_DARK, leading=11),
+            )]],
+            colWidths=[W],
+        )
+        notes_tbl.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, -1), GOLD_BG),
+            ("BOX",           (0, 0), (-1, -1), 0.5, GOLD),
+            ("LINEBEFORE",    (0, 0), (0, -1),  3, GOLD),
+            ("TOPPADDING",    (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
+        ]))
+        story.append(notes_tbl)
+        story.append(Spacer(1, 4 * mm))
+ 
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SECTION 3 — LINE ITEMS TABLE
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Columns: # | Description | Bags | Wt/Bag (kg) | Total Wt (kg) | Unit Price | Amount
+    col_w = [
+        W * 0.05,   # #
+        W * 0.28,   # Description
+        W * 0.09,   # Bags
+        W * 0.11,   # Wt/Bag
+        W * 0.12,   # Total Wt
+        W * 0.155,  # Unit Price
+        W * 0.155,  # Amount
+    ]
+    hdrs = ["#", "DESCRIPTION", "BAGS", "WT/BAG\n(KG)", "TOTAL WT\n(KG)", "UNIT PRICE\n(₹/KG)", "AMOUNT\n(₹)"]
+ 
+    hdr_s  = S("IH", fontSize=7.5, fontName="Helvetica-Bold", textColor=WHITE, alignment=TA_CENTER)
+    idx_s  = S("IX", fontSize=8.5, textColor=GREY_MID, alignment=TA_CENTER)
+    desc_s = S("DS", fontSize=8.5, textColor=GREY_DARK, leading=11)
+    num_s  = S("NS", fontSize=8.5, textColor=GREY_DARK, alignment=TA_RIGHT)
+    ctr_s  = S("CS", fontSize=8.5, textColor=GREY_DARK, alignment=TA_CENTER)
+    amt_s  = S("AS", fontSize=8.5, fontName="Helvetica-Bold", textColor=NAVY, alignment=TA_RIGHT)
+ 
+    items_data = [[Paragraph(h, hdr_s) for h in hdrs]]
+ 
     total_weight = 0.0
     total_bags   = 0
-
+    subtotal     = 0.0
+    price        = getattr(dispatch_entry, "price", None) or 0
+ 
     if products:
-        for product in products:
-            wt = product.total_weight
-            price = getattr(dispatch_entry, 'price', None) or 0
-            line_total = wt * price
-            items_data.append([
-                f"{product.num_bags:.0f}",
-                product.product_type,
-                f"{product.weight_per_bag:.2f}",
-                f"Rs. {price:.2f}" if price else "",
-                f"Rs. {line_total:.2f}" if price else f"{wt:.2f} kg",
-            ])
+        for i, product in enumerate(products, 1):
+            wt         = float(product.total_weight)
+            bags       = int(product.num_bags)
+            wpb        = float(product.weight_per_bag)
+            line_amt   = wt * price
             total_weight += wt
-            total_bags   += int(product.num_bags)
-
-    # Empty rows to fill space (like a real invoice template)
-    empty_rows_needed = max(0, 6 - len(items_data) + 1)
-    for _ in range(empty_rows_needed):
-        items_data.append(['', '', '', '', ''])
-
-    items_table = Table(items_data, colWidths=col_widths, repeatRows=1)
-
-    row_count = len(items_data)
-    items_table.setStyle(TableStyle([
+            total_bags   += bags
+            subtotal     += line_amt
+            items_data.append([
+                Paragraph(str(i),                  idx_s),
+                Paragraph(product.product_type,    desc_s),
+                Paragraph(str(bags),               ctr_s),
+                Paragraph(f"{wpb:.2f}",            num_s),
+                Paragraph(f"{wt:.2f}",             num_s),
+                Paragraph(f"₹ {price:.2f}" if price else "—", num_s),
+                Paragraph(f"₹ {line_amt:.2f}" if price else f"{wt:.2f} kg", amt_s),
+            ])
+ 
+    # Pad to minimum 6 data rows for clean layout
+    min_rows = 6
+    while len(items_data) - 1 < min_rows:
+        items_data.append([Paragraph("", idx_s)] + [Paragraph("", desc_s)] * 6)
+ 
+    items_tbl = Table(items_data, colWidths=col_w, repeatRows=1)
+    row_count  = len(items_data)
+ 
+    item_cmds = [
         # Header
-        ('BACKGROUND',    (0, 0), (-1, 0), TEAL),
-        ('TEXTCOLOR',     (0, 0), (-1, 0), WHITE),
-        ('FONTNAME',      (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE',      (0, 0), (-1, 0), 8),
-        ('ALIGN',         (0, 0), (-1, 0), 'CENTER'),
-        ('VALIGN',        (0, 0), (-1, 0), 'MIDDLE'),
-        ('TOPPADDING',    (0, 0), (-1, 0), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ("BACKGROUND",    (0, 0), (-1, 0),  NAVY),
+        ("LINEBELOW",     (0, 0), (-1, 0),  2,   GOLD),
+        ("TOPPADDING",    (0, 0), (-1, 0),  8),
+        ("BOTTOMPADDING", (0, 0), (-1, 0),  8),
+        ("VALIGN",        (0, 0), (-1, 0),  "MIDDLE"),
         # Data rows
-        ('FONTSIZE',      (0, 1), (-1, -1), 9),
-        ('ALIGN',         (0, 1), (0, -1), 'CENTER'),
-        ('ALIGN',         (1, 1), (1, -1), 'LEFT'),
-        ('ALIGN',         (2, 1), (-1, -1), 'RIGHT'),
-        ('VALIGN',        (0, 1), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING',    (0, 1), (-1, -1), 7),
-        ('BOTTOMPADDING', (0, 1), (-1, -1), 7),
-        # Alternating rows
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LIGHT_GRAY]),
+        ("TOPPADDING",    (0, 1), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 7),
+        ("VALIGN",        (0, 1), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING",   (1, 0), (1, -1),  8),
+        ("RIGHTPADDING",  (2, 0), (-1, -1), 8),
         # Grid
-        ('GRID',          (0, 0), (-1, -1), 0.5, MID_GRAY),
-        ('BOX',           (0, 0), (-1, -1), 1,   TEAL),
-        # Left padding for description
-        ('LEFTPADDING',   (1, 0), (1, -1), 8),
-    ]))
-    story.append(items_table)
-    story.append(Spacer(1, 0.0 * inch))
-
-    # ─────────────────────────────────────────
-    # TOTALS SECTION (right-aligned box)
-    # ─────────────────────────────────────────
-    price = getattr(dispatch_entry, 'price', None) or 0
-    subtotal = total_weight * price
-
-    lbl_s = style('TLbl', fontSize=9, fontName='Helvetica',      alignment=TA_RIGHT)
-    val_s = style('TVal', fontSize=9, fontName='Helvetica-Bold', alignment=TA_RIGHT)
-    big_lbl = style('BLbl', fontSize=11, fontName='Helvetica-Bold', alignment=TA_RIGHT, textColor=TEAL)
-    big_val = style('BVal', fontSize=11, fontName='Helvetica-Bold', alignment=TA_RIGHT, textColor=TEAL)
-
-    summary_rows = [
-        [Paragraph("SUBTOTAL", lbl_s),          Paragraph(f"Rs. {subtotal:.2f}", val_s)],
-        [Paragraph("TOTAL WEIGHT (KG)", lbl_s),  Paragraph(f"{total_weight:.2f} kg", val_s)],
-        [Paragraph("TOTAL BAGS", lbl_s),         Paragraph(str(total_bags), val_s)],
-        [Paragraph("TOTAL DUE", big_lbl),        Paragraph(f"Rs. {subtotal:.2f}", big_val)],
+        ("LINEBELOW",     (0, 1), (-1, -1), 0.4, RULE),
+        ("LINEBEFORE",    (1, 0), (-1, -1), 0.4, RULE),
+        ("BOX",           (0, 0), (-1, -1), 0.8, NAVY),
     ]
-
-    summary_col = [3.8 * inch, 2.9 * inch]
-    summary_table = Table([[['', '']]] + [['']], colWidths=[sum(summary_col)])  # spacer trick
-
-    # Proper summary table
-    sum_t = Table(summary_rows, colWidths=summary_col)
+    # Alternating row backgrounds
+    for i in range(1, row_count):
+        bg = GREY_LIGHT if i % 2 == 0 else WHITE
+        item_cmds.append(("BACKGROUND", (0, i), (-1, i), bg))
+ 
+    items_tbl.setStyle(TableStyle(item_cmds))
+    story.append(items_tbl)
+    story.append(Spacer(1, 0))
+ 
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SECTION 4 — TOTALS BLOCK  (right-aligned)
+    # ══════════════════════════════════════════════════════════════════════════
+    tl_s  = S("TL",  fontSize=8.5, textColor=GREY_MID,  alignment=TA_RIGHT)
+    tv_s  = S("TV",  fontSize=8.5, fontName="Helvetica-Bold", textColor=GREY_DARK, alignment=TA_RIGHT)
+    ttl_s = S("TTL", fontSize=11,  fontName="Helvetica-Bold", textColor=WHITE, alignment=TA_RIGHT)
+    ttv_s = S("TTV", fontSize=11,  fontName="Helvetica-Bold", textColor=WHITE, alignment=TA_RIGHT)
+ 
+    sum_col_w = [W * 0.20, W * 0.17]
+    sum_rows  = [
+        [Paragraph("SUBTOTAL",       tl_s), Paragraph(f"₹ {subtotal:.2f}",      tv_s)],
+        [Paragraph("TOTAL WEIGHT",   tl_s), Paragraph(f"{total_weight:.2f} kg",  tv_s)],
+        [Paragraph("TOTAL BAGS",     tl_s), Paragraph(str(total_bags),            tv_s)],
+        [Paragraph("TOTAL DUE",      ttl_s), Paragraph(f"₹ {subtotal:.2f}",      ttv_s)],
+    ]
+    sum_t = Table(sum_rows, colWidths=sum_col_w)
     sum_t.setStyle(TableStyle([
-        ('ALIGN',         (0, 0), (-1, -1), 'RIGHT'),
-        ('TOPPADDING',    (0, 0), (-1, -1), 5),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-        ('RIGHTPADDING',  (0, 0), (-1, -1), 6),
-        ('LEFTPADDING',   (0, 0), (-1, -1), 6),
-        # Dividers
-        ('LINEBELOW',     (0, 0), (-1, 0), 0.5, MID_GRAY),
-        ('LINEBELOW',     (0, 1), (-1, 1), 0.5, MID_GRAY),
-        ('LINEBELOW',     (0, 2), (-1, 2), 0.5, MID_GRAY),
-        # Total due row
-        ('BACKGROUND',    (0, -1), (-1, -1), LIGHT_TEAL),
-        ('LINEABOVE',     (0, -1), (-1, -1), 1.5, TEAL),
-        ('LINEBELOW',     (0, -1), (-1, -1), 1.5, TEAL),
-        # Box
-        ('BOX',           (0, 0), (-1, -1), 1, TEAL),
+        ("TOPPADDING",    (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 8),
+        ("BACKGROUND",    (0, 0), (-1, -2), GOLD_BG),
+        ("LINEBELOW",     (0, 0), (-1, -2), 0.4, RULE),
+        ("BACKGROUND",    (0, -1), (-1, -1), NAVY),
+        ("LINEABOVE",     (0, -1), (-1, -1), 2,   GOLD),
+        ("BOX",           (0, 0),  (-1, -1), 0.8, NAVY),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
-
-    # Put summary on right side
-    outer = Table([[None, sum_t]], colWidths=[W - sum(summary_col), sum(summary_col)])
+ 
+    spacer_w = W - sum(sum_col_w)
+    outer = Table([[None, sum_t]], colWidths=[spacer_w, sum(sum_col_w)])
     outer.setStyle(TableStyle([
-        ('TOPPADDING',    (0, 0), (-1, -1), 0),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-        ('LEFTPADDING',   (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING',  (0, 0), (-1, -1), 0),
-        ('VALIGN',        (0, 0), (-1, -1), 'TOP'),
+        ("TOPPADDING",    (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
     ]))
     story.append(outer)
-    story.append(Spacer(1, 0.25 * inch))
-
-    # ─────────────────────────────────────────
-    # FOOTER: Terms & Signature
-    # ─────────────────────────────────────────
-    story.append(HRFlowable(width=W, thickness=0.5, color=MID_GRAY, spaceAfter=8))
-
-    terms_lbl = style('TrLbl', fontSize=8, fontName='Helvetica-Bold', textColor=TEAL)
-    terms_txt = style('TrTxt', fontSize=8, leading=12)
-    sig_lbl   = style('SigLbl', fontSize=8, fontName='Helvetica-Bold', textColor=TEAL, alignment=TA_RIGHT)
-    sig_line  = style('SigLn',  fontSize=9, alignment=TA_RIGHT)
-
-    footer_data = [[
-        [
-            Paragraph("TERMS & CONDITIONS:", terms_lbl),
-            Spacer(1, 4),
-            Paragraph("1. Payment terms as agreed.", terms_txt),
-            Paragraph("2. Goods once sold cannot be returned.", terms_txt),
-            Paragraph("3. All disputes subject to local jurisdiction.", terms_txt),
-        ],
-        [
-            Paragraph("Authorized Signature:", sig_lbl),
-            Spacer(1, 28),
-            Paragraph("_________________________________", sig_line),
-            Paragraph(company_name, style('SigCo', fontSize=8, alignment=TA_RIGHT, textColor=colors.grey)),
-        ]
-    ]]
-
-    footer_table = Table(footer_data, colWidths=[W * 0.55, W * 0.45])
-    footer_table.setStyle(TableStyle([
-        ('VALIGN',        (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING',   (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING',  (0, 0), (-1, -1), 0),
-        ('TOPPADDING',    (0, 0), (-1, -1), 0),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+    story.append(Spacer(1, 6 * mm))
+ 
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SECTION 5 — FOOTER  (terms + signature)
+    # ══════════════════════════════════════════════════════════════════════════
+    # Thin gold rule
+    story.append(Table(
+        [[""]],
+        colWidths=[W],
+        rowHeights=[2],
+        style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), GOLD)]),
+    ))
+    story.append(Spacer(1, 4 * mm))
+ 
+    terms_lbl_s = S("TrL", fontSize=7.5, fontName="Helvetica-Bold", textColor=NAVY)
+    terms_txt_s = S("TrT", fontSize=7.5, textColor=GREY_MID, leading=12)
+    sig_lbl_s   = S("SgL", fontSize=7.5, fontName="Helvetica-Bold", textColor=NAVY,     alignment=TA_RIGHT)
+    sig_line_s  = S("SgN", fontSize=9,   textColor=GREY_MID,                            alignment=TA_RIGHT)
+    sig_co_s    = S("SgC", fontSize=7.5, textColor=GREY_MID,                            alignment=TA_RIGHT)
+ 
+    footer_tbl = Table(
+        [[
+            [
+                Paragraph("TERMS & CONDITIONS", terms_lbl_s),
+                Spacer(1, 4),
+                Paragraph("1. Payment terms as agreed upon.", terms_txt_s),
+                Paragraph("2. Goods once sold cannot be returned.", terms_txt_s),
+                Paragraph("3. All disputes subject to local jurisdiction.", terms_txt_s),
+                Paragraph("4. This is a computer-generated invoice.", terms_txt_s),
+            ],
+            [
+                Paragraph("For " + company_name.upper(), sig_lbl_s),
+                Spacer(1, 30),
+                Paragraph("________________________________", sig_line_s),
+                Paragraph("Authorized Signatory", sig_co_s),
+            ],
+        ]],
+        colWidths=[W * 0.60, W * 0.40],
+    )
+    footer_tbl.setStyle(TableStyle([
+        ("VALIGN",       (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING",  (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING",   (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 0),
+        ("LINEBEFORE",   (0, 0), (0, -1),  3, NAVY),
+        ("LEFTPADDING",  (0, 0), (0, -1),  8),
     ]))
-    story.append(footer_table)
-
-    story.append(Spacer(1, 0.15 * inch))
-
-    # Timestamp
-    ts = style('TS', fontSize=7, textColor=colors.lightgrey, alignment=TA_CENTER)
-    story.append(Paragraph(f"Generated on {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}", ts))
-
+    story.append(footer_tbl)
+    story.append(Spacer(1, 4 * mm))
+ 
+    # Bottom timestamp strip
+    ts_tbl = Table(
+        [[Paragraph(
+            f"Generated on {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}   |   {company_name}   |   {inv_no}",
+            S("TS", fontSize=6.5, textColor=HexColor("#AAAAAA"), alignment=TA_CENTER),
+        )]],
+        colWidths=[W],
+    )
+    ts_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), GREY_LIGHT),
+        ("TOPPADDING",    (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("BOX",           (0, 0), (-1, -1), 0.4, RULE),
+    ]))
+    story.append(ts_tbl)
+ 
     doc.build(story)
     buffer.seek(0)
     return buffer
-
-
-# ──────────────────────────────────────────────────────────
-# DEMO: generate a sample invoice to verify layout
-# ──────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    from dataclasses import dataclass, field
-    from typing import List, Optional
-    from datetime import date
-
-    @dataclass
-    class MockProduct:
-        product_type: str
-        num_bags: float
-        weight_per_bag: float
-
-        @property
-        def total_weight(self):
-            return self.num_bags * self.weight_per_bag
-
-    @dataclass
-    class MockDispatch:
-        id: int = 1001
-        date: date = date(2024, 10, 8)
-        vehicle_no: str = "MH-12-AB-1234"
-        party_name: str = "Fresh Farms Ltd."
-        party_address: str = "45 Market Street, Industrial Area"
-        pincode: str = "400001"
-        party_phone: str = "+91 98765 43210"
-        price: float = 85.50
-        notes: str = "Handle with care. Deliver before 9 AM."
-        salesperson: str = "Ravi Kumar"
-        po_number: str = "PO-2024-0089"
-        terms: str = "Net 30 Days"
-
-    products = [
-        MockProduct("Broiler Chicken Feed (Starter)", 20, 50.0),
-        MockProduct("Layer Mash Premium",              15, 40.0),
-        MockProduct("Grower Pellets Grade-A",          10, 25.0),
-    ]
-
-    dispatch = MockDispatch()
-    buf = generate_invoice_pdf(
-        dispatch, products,
-        company_name="POULTRY MANAGEMENT SYSTEM",
-        company_tagline="Quality Feed & Poultry Solutions",
-        company_address="Plot 12, Agro Industrial Zone",
-        company_city="Pune, MH 411001",
-        company_phone="Phone (020) 555-0100",
-        company_fax="(020) 555-0101",
-    )
-
-    out_path = "/mnt/user-data/outputs/sample_invoice.pdf"
-    with open(out_path, "wb") as f:
-        f.write(buf.read())
-    print(f"Invoice saved to {out_path}")
+ 

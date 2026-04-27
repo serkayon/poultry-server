@@ -1,4 +1,4 @@
-"""PLC data generator used to mimic live ingestion into DB."""
+# PLC data generator used to mimic live ingestion into DB.
 
 from __future__ import annotations
 
@@ -37,17 +37,20 @@ _writer_thread: threading.Thread | None = None
 _ensure_lock = threading.Lock()
 logger = logging.getLogger(__name__)
 
+# Handle next val.
 
 def _next_val(prev: float, low: float, high: float, step: float) -> float:
     delta = (random.random() - 0.5) * 2 * step
     return max(low, min(high, prev + delta))
 
+# Handle interval floor.
 
 def _interval_floor(dt: datetime, interval_seconds: int) -> datetime:
     safe_interval = max(1, int(interval_seconds))
     floored_second = (dt.second // safe_interval) * safe_interval
     return dt.replace(second=floored_second, microsecond=0, tzinfo=None)
 
+# Handle state from row.
 
 def _state_from_row(row: PLCDataSnapshot | None) -> dict:
     if not row:
@@ -71,6 +74,7 @@ def _state_from_row(row: PLCDataSnapshot | None) -> dict:
         ),
     }
 
+# Handle advance state.
 
 def _advance_state(state: dict) -> dict:
     nxt = dict(state)
@@ -86,16 +90,14 @@ def _advance_state(state: dict) -> dict:
     nxt["pellet_motor_load"] = _next_val(nxt["pellet_motor_load"], 35, 95, 2.0)
     return nxt
 
+# Handle insert snapshot.
 
 def _insert_snapshot(
     db: Session,
     state: dict,
-    recorded_at: datetime,
-    client_id: int | None = None,
-) -> None:
+    recorded_at: datetime) -> None:
     db.add(
         PLCDataSnapshot(
-            client_id=client_id,
             running_status=bool(state.get("running_status", False)),
             process_status=int(state.get("process_status", 100 if state.get("running_status", False) else 0)),
             ambient_temp=round(float(state["ambient_temp"]), 1),
@@ -108,10 +110,10 @@ def _insert_snapshot(
             motor_rpm=round(float(state["motor_rpm"]), 1),
             pellet_feeder_speed=round(float(state["pellet_feeder_speed"]), 1),
             pellet_motor_load=round(float(state["pellet_motor_load"]), 1),
-            recorded_at=recorded_at,
-        )
+            recorded_at=recorded_at)
     )
 
+# Get or create machine state.
 
 def get_or_create_machine_state(db: Session) -> MachineState:
     machine_state = db.get(MachineState, MACHINE_STATE_ID)
@@ -123,13 +125,13 @@ def get_or_create_machine_state(db: Session) -> MachineState:
     db.flush()
     return machine_state
 
+# Set machine running.
 
 def set_machine_running(
     db: Session,
     *,
     running: bool,
-    active_batch_id: int | None = None,
-) -> MachineState:
+    active_batch_id: int | None = None) -> MachineState:
     machine_state = get_or_create_machine_state(db)
     was_running = bool(machine_state.is_running)
     machine_state.is_running = running
@@ -146,14 +148,12 @@ def set_machine_running(
         _insert_snapshot(db=db, state=state, recorded_at=datetime.utcnow())
     return machine_state
 
+# Ensure DB has PLC rows up to now with a fixed time interval.
 
 def ensure_plc_live_data(
     db: Session,
     minutes: int = 60,
-    client_id: int | None = None,
-    interval_seconds: int = 5,
-) -> None:
-    """Ensure DB has PLC rows up to now with a fixed time interval."""
+    interval_seconds: int = 5) -> None:
     with _ensure_lock:
         machine_state = get_or_create_machine_state(db)
         if not machine_state.is_running:
@@ -166,11 +166,6 @@ def ensure_plc_live_data(
         window_start = now_slot - timedelta(seconds=(lookback_slots - 1) * step_seconds)
 
         query = select(PLCDataSnapshot)
-        if client_id is None:
-            query = query.where(PLCDataSnapshot.client_id.is_(None))
-        else:
-            query = query.where(PLCDataSnapshot.client_id == client_id)
-
         latest_row = db.execute(
             query.order_by(PLCDataSnapshot.recorded_at.desc()).limit(1)
         ).scalars().one_or_none()
@@ -187,8 +182,7 @@ def ensure_plc_live_data(
             else:
                 fill_start = max(
                     last_slot + timedelta(seconds=step_seconds),
-                    window_start,
-                )
+                    window_start)
 
         cursor = fill_start
         step = timedelta(seconds=step_seconds)
@@ -196,12 +190,12 @@ def ensure_plc_live_data(
             state = _advance_state(state)
             state["running_status"] = True
             state["process_status"] = 100
-            _insert_snapshot(db=db, state=state, recorded_at=cursor, client_id=client_id)
+            _insert_snapshot(db=db, state=state, recorded_at=cursor)
             cursor += step
 
+# Optional continuous writer for manual runs.
 
 def run_plc_simulation(interval_seconds: int = 5):
-    """Optional continuous writer for manual runs."""
     state = dict(BASE_STATE)
     while True:
         try:
@@ -217,6 +211,7 @@ def run_plc_simulation(interval_seconds: int = 5):
             logger.exception("PLC simulation loop failed")
         time.sleep(max(1, interval_seconds))
 
+# Handle background writer loop.
 
 def _background_writer_loop(interval_seconds: int, lookback_minutes: int) -> None:
     while True:
@@ -230,9 +225,9 @@ def _background_writer_loop(interval_seconds: int, lookback_minutes: int) -> Non
             logger.exception("PLC background writer loop failed")
         time.sleep(max(1, interval_seconds))
 
+# Start one daemon writer thread per process.
 
 def start_plc_background_writer(interval_seconds: int = 5, lookback_minutes: int = 60) -> None:
-    """Start one daemon writer thread per process."""
     global _writer_thread
     with _writer_lock:
         if _writer_thread and _writer_thread.is_alive():
@@ -241,6 +236,5 @@ def start_plc_background_writer(interval_seconds: int = 5, lookback_minutes: int
             target=_background_writer_loop,
             args=(interval_seconds, lookback_minutes),
             daemon=True,
-            name="plc-background-writer",
-        )
+            name="plc-background-writer")
         _writer_thread.start()

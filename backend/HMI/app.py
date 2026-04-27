@@ -1,3 +1,6 @@
+# HMI web interface for machine control and batch start/stop.
+
+
 from __future__ import annotations
 
 import os
@@ -15,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 
-BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://43.205.124.78:8000").rstrip("/")
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://localhost:8000").rstrip("/")
 REQUEST_TIMEOUT_SECONDS = 10
 HMI_SECRET_KEY = os.getenv("HMI_SECRET_KEY", "hmi-local-dev-secret")
 
@@ -32,13 +35,25 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
+# Handle today ist iso.
+
 def _today_ist_iso() -> str:
     return datetime.now(IST_TIMEZONE).date().isoformat()
 
 
+# Handle utc now iso.
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# Handle backend url.
+
 def _backend_url(path: str) -> str:
     return f"{BACKEND_BASE_URL}{path}"
 
+
+# Handle safe get json.
 
 def _safe_get_json(path: str, fallback):
     try:
@@ -48,6 +63,8 @@ def _safe_get_json(path: str, fallback):
     except Exception:
         return fallback
 
+
+# Handle response error detail.
 
 def _response_error_detail(response: requests.Response, fallback: str) -> str:
     try:
@@ -65,11 +82,10 @@ def _response_error_detail(response: requests.Response, fallback: str) -> str:
     return f"{fallback} ({response.status_code})."
 
 
+# Backward-compatible fallback for older backend builds that don't expose
+# /api/production/hmi/start-batch yet.
+
 def _legacy_start_batch(payload: dict) -> tuple[int | None, str | None]:
-    """
-    Backward-compatible fallback for older backend builds that don't expose
-    /api/production/hmi/start-batch yet.
-    """
     create_response = requests.post(
         _backend_url("/api/production/hmi/batches"),
         json=payload,
@@ -101,6 +117,8 @@ def _legacy_start_batch(payload: dict) -> tuple[int | None, str | None]:
     return int(batch_id), None
 
 
+# Suggest batch no from batches.
+
 def _suggest_batch_no_from_batches(batches: list[dict]) -> str:
     pattern = re.compile(r"^BATCH(\d+)$", re.IGNORECASE)
     max_sequence = 0
@@ -118,11 +136,15 @@ def _suggest_batch_no_from_batches(batches: list[dict]) -> str:
     return f"BATCH{max_sequence + 1:05d}"
 
 
+# Handle flash.
+
 def _flash(request: Request, message: str, category: str = "message") -> None:
     flashes = list(request.session.get("_flashes", []))
     flashes.append({"category": category, "message": message})
     request.session["_flashes"] = flashes
 
+
+# Handle pop flashes.
 
 def _pop_flashes(request: Request) -> list[tuple[str, str]]:
     raw_messages = request.session.pop("_flashes", [])
@@ -133,9 +155,13 @@ def _pop_flashes(request: Request) -> list[tuple[str, str]]:
     return out
 
 
+# Handle redirect to index.
+
 def _redirect_to_index(request: Request) -> RedirectResponse:
     return RedirectResponse(url=request.url_for("index"), status_code=303)
 
+
+# Handle index.
 
 @app.get("/", response_class=HTMLResponse, name="index")
 def index(request: Request):
@@ -155,10 +181,14 @@ def index(request: Request):
     suggested_batch_no = _suggest_batch_no_from_batches(safe_batches)
     messages = _pop_flashes(request)
 
+    # Handle template url for.
+
     def _template_url_for(name: str, **params) -> str:
         if "filename" in params and "path" not in params:
             params["path"] = params.pop("filename")
         return str(request.url_for(name, **params))
+
+    # Handle template get flashed messages.
 
     def _template_get_flashed_messages(with_categories: bool = False):
         if with_categories:
@@ -179,6 +209,8 @@ def index(request: Request):
         },
     )
 
+
+# Start batch.
 
 @app.post("/batch/start", name="start_batch")
 async def start_batch(request: Request):
@@ -203,7 +235,7 @@ async def start_batch(request: Request):
             "batch_count": batch_count,
             "duration_per_count_seconds": duration_seconds,
             "recipe_id": recipe_id,
-            "date": form.get("date"),
+            "date": _utc_now_iso(),
         }
     except ValueError as exc:
         _flash(request, str(exc), "error")
@@ -239,6 +271,8 @@ async def start_batch(request: Request):
     return _redirect_to_index(request)
 
 
+# Start machine.
+
 @app.post("/machine/start", name="start_machine")
 def start_machine(request: Request):
     try:
@@ -261,6 +295,8 @@ def start_machine(request: Request):
     return _redirect_to_index(request)
 
 
+# Stop machine.
+
 @app.post("/machine/stop", name="stop_machine")
 def stop_machine(request: Request):
     try:
@@ -282,6 +318,8 @@ def stop_machine(request: Request):
 
     return _redirect_to_index(request)
 
+
+# Stop batch.
 
 @app.post("/batch/stop", name="stop_batch")
 def stop_batch(request: Request):

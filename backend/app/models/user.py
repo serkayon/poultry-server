@@ -6,10 +6,14 @@ import enum
 from ..database import Base
 
 
+# Define UserRole.
+
 class UserRole(str, enum.Enum):
     vendor = "vendor"
     customer = "customer"
 
+
+# Define User.
 
 class User(Base):
     __tablename__ = "users"

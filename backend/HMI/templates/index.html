@@ -175,8 +175,8 @@
                     <td>{{ machine_status.active_batch.duration_per_count_seconds or '--' }} sec</td>
                   </tr>
                   <tr>
-                    <th>Recipe ID</th>
-                    <td>{{ machine_status.active_batch.recipe_id or '--' }}</td>
+                    <th>Recipe Type</th>
+                    <td>{{ machine_status.active_batch.recipe_type or '--' }}</td>
                   </tr>
                 </tbody>
               </table>
@@ -211,7 +211,7 @@
                     <tr>
                       <td class="mono">{{ b.id }}</td>
                       <td class="mono strong">{{ b.batch_no }}</td>
-                      <td class="mono">{{ b.recipe_id or '--' }}</td>
+                      <td class="mono">{{ b.recipe_type or '--' }}</td>
                       <td class="mono">{{ b.progress_label or '--' }}</td>
                       <td><span class="chip {{ chip }}">{{ b.run_status }}</span></td>
                       <td class="mono">{{ b.output or '--' }}</td>

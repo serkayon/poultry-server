@@ -2,21 +2,25 @@ from datetime import datetime, timedelta
 from math import floor
 from typing import Mapping, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models.dispatch import DispatchEntry, DispatchProduct
 from ..models.production import ProductionBatch, ProductionBatchMaterial
 from ..models.raw_material import RawMaterialEntry
-from ..models.stock import FeedStock, RMStockLedger
+from ..models.stock import FeedStock, FeedStockCurrent, RMStockLedger, RawMaterialStock
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
 
+
+# Start of day.
 
 def _start_of_day(dt: datetime) -> datetime:
     # Persist one ledger row per type, per day.
     return dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
 
+
+# Normalize bag weight grams.
 
 def _normalize_bag_weight_grams(weight_per_bag: float | int | None) -> int | None:
     if weight_per_bag in (None, ""):
@@ -30,12 +34,16 @@ def _normalize_bag_weight_grams(weight_per_bag: float | int | None) -> int | Non
     return int(round(parsed * 1000))
 
 
+# Handle bag weight label.
+
 def _bag_weight_label(bag_weight_grams: int | None) -> str:
     if bag_weight_grams in (None, 0):
         return ""
     kg = bag_weight_grams / 1000.0
     return f"{kg:g}kg/bag"
 
+
+# Handle feed variant label.
 
 def _feed_variant_label(feed_type: str, bag_weight_grams: int | None) -> str:
     label = _bag_weight_label(bag_weight_grams)
@@ -44,9 +52,31 @@ def _feed_variant_label(feed_type: str, bag_weight_grams: int | None) -> str:
     return f"{feed_type} ({label})"
 
 
+# Normalize feed type.
+
 def _normalize_feed_type(feed_type: str | None) -> str:
     return str(feed_type or "").strip()
 
+
+# Normalize bag weight key.
+
+def _normalize_bag_weight_key(bag_weight_grams: int | None) -> int | None:
+    if bag_weight_grams in (None, 0):
+        return None
+    try:
+        parsed = int(bag_weight_grams)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+# Normalize rm name.
+
+def _normalize_rm_name(rm_name: str | None) -> str:
+    return str(rm_name or "").strip()
+
+
+# Normalize batch run count.
 
 def _normalize_batch_run_count(value: float | int | None) -> float:
     try:
@@ -56,10 +86,11 @@ def _normalize_batch_run_count(value: float | int | None) -> float:
     return max(0.0, count)
 
 
+# Handle calculate rm consumption quantity.
+
 def calculate_rm_consumption_quantity(
     per_batch_quantity: float | int | None,
-    batch_run_count: float | int | None,
-) -> float:
+    batch_run_count: float | int | None) -> float:
     try:
         quantity = float(per_batch_quantity or 0)
     except (TypeError, ValueError):
@@ -67,20 +98,18 @@ def calculate_rm_consumption_quantity(
     return max(0.0, quantity) * _normalize_batch_run_count(batch_run_count)
 
 
+# Return actual utilized batch count for RM consumption calculations.
+# Priority:
+# 1) hmi_completed_count when present (>0) for completed batches
+# 2) legacy fallback: if status is completed and completed_count is 0, use planned batch_size
+# 3) otherwise 0
+
 def resolve_effective_batch_run_count(
     *,
     batch_size: float | int | None,
     hmi_completed_count: float | int | None,
     hmi_status: str | None,
-    rm_shortage_flag: bool | None = None,
-) -> float:
-    """
-    Return actual utilized batch count for RM consumption calculations.
-    Priority:
-    1) hmi_completed_count when present (>0) for completed batches
-    2) legacy fallback: if status is completed and completed_count is 0, use planned batch_size
-    3) otherwise 0
-    """
+    rm_shortage_flag: bool | None = None) -> float:
     if bool(rm_shortage_flag):
         return 0.0
 
@@ -99,20 +128,31 @@ def resolve_effective_batch_run_count(
     return planned_count
 
 
+# Get rm available stock.
+
 def get_rm_available_stock(
     db: Session,
     *,
-    client_id: int,
     rm_name: str,
-    date: datetime,
-) -> float:
+    date: datetime) -> float:
+    normalized_rm_name = _normalize_rm_name(rm_name)
+    if not normalized_rm_name:
+        return 0.0
+
     day = _start_of_day(date)
+    today = _start_of_day(datetime.utcnow())
+    if day >= today:
+        current_row = db.execute(
+            select(RawMaterialStock).where(
+                RawMaterialStock.rm_name == normalized_rm_name)
+        ).scalars().one_or_none()
+        if current_row is not None:
+            return float(current_row.quantity or 0)
+
     row = db.execute(
         select(RMStockLedger).where(
-            RMStockLedger.client_id == client_id,
-            RMStockLedger.rm_name == rm_name,
-            RMStockLedger.date == day,
-        )
+            RMStockLedger.rm_name == normalized_rm_name,
+            RMStockLedger.date == day)
     ).scalars().one_or_none()
 
     if row:
@@ -122,17 +162,17 @@ def get_rm_available_stock(
             - float(row.consumption or 0)
         )
 
-    return _latest_rm_closing(db=db, client_id=client_id, rm_name=rm_name, day=day)
+    return _latest_rm_closing(db=db, rm_name=normalized_rm_name, day=day)
 
+
+# Collect rm shortages.
 
 def collect_rm_shortages(
     db: Session,
     *,
-    client_id: int,
     date: datetime,
     materials: Sequence[Mapping[str, object]],
-    batch_run_count: float | int | None,
-) -> list[dict]:
+    batch_run_count: float | int | None) -> list[dict]:
     required_by_rm: dict[str, float] = {}
 
     for material in materials:
@@ -141,8 +181,7 @@ def collect_rm_shortages(
             continue
         required_quantity = calculate_rm_consumption_quantity(
             per_batch_quantity=material.get("quantity"),
-            batch_run_count=batch_run_count,
-        )
+            batch_run_count=batch_run_count)
         if required_quantity <= 0:
             continue
         required_by_rm[rm_name] = required_by_rm.get(rm_name, 0.0) + float(required_quantity)
@@ -152,10 +191,8 @@ def collect_rm_shortages(
         required_quantity = required_by_rm[rm_name]
         available_quantity = get_rm_available_stock(
             db=db,
-            client_id=client_id,
             rm_name=rm_name,
-            date=date,
-        )
+            date=date)
         if required_quantity <= available_quantity:
             continue
         shortages.append(
@@ -169,14 +206,14 @@ def collect_rm_shortages(
     return shortages
 
 
+# Handle calculate max supported batch count.
+
 def calculate_max_supported_batch_count(
     db: Session,
     *,
-    client_id: int,
     date: datetime,
     materials: Sequence[Mapping[str, object]],
-    requested_batch_count: float | int | None,
-) -> int:
+    requested_batch_count: float | int | None) -> int:
     try:
         requested = max(0.0, float(requested_batch_count or 0))
     except (TypeError, ValueError):
@@ -205,10 +242,8 @@ def calculate_max_supported_batch_count(
     for rm_name, per_batch_qty in per_batch_by_rm.items():
         available = get_rm_available_stock(
             db=db,
-            client_id=client_id,
             rm_name=rm_name,
-            date=date,
-        )
+            date=date)
         if per_batch_qty <= 0:
             continue
         supported = min(supported, max(0.0, available / per_batch_qty))
@@ -216,11 +251,12 @@ def calculate_max_supported_batch_count(
     return max(0, int(floor(supported + 1e-9)))
 
 
+# Format rm shortage message.
+
 def format_rm_shortage_message(
     shortages: Sequence[Mapping[str, object]],
     *,
-    heading: str = "Insufficient raw material stock",
-) -> str:
+    heading: str = "Insufficient raw material stock") -> str:
     if not shortages:
         return heading
 
@@ -251,40 +287,51 @@ def format_rm_shortage_message(
     return "\n".join(lines)
 
 
+# Handle latest rm closing.
+
 def _latest_rm_closing(
     db: Session,
-    client_id: int,
     rm_name: str,
-    day: datetime,
-) -> float:
+    day: datetime) -> float:
     latest = db.execute(
         select(RMStockLedger)
         .where(
-            RMStockLedger.client_id == client_id,
-            RMStockLedger.rm_name == rm_name,
-            RMStockLedger.date < day,
-        )
+            RMStockLedger.rm_name == _normalize_rm_name(rm_name),
+            RMStockLedger.date < day)
         .order_by(RMStockLedger.date.desc())
         .limit(1)
     ).scalars().one_or_none()
     return float(latest.closing_stock if latest else 0)
 
 
+# Handle latest rm closing any.
+
+def _latest_rm_closing_any(
+    db: Session,
+    rm_name: str) -> float:
+    latest = db.execute(
+        select(RMStockLedger)
+        .where(
+            RMStockLedger.rm_name == rm_name)
+        .order_by(RMStockLedger.date.desc(), RMStockLedger.id.desc())
+        .limit(1)
+    ).scalars().one_or_none()
+    return float(latest.closing_stock if latest else 0)
+
+
+# Handle latest feed closing.
+
 def _latest_feed_closing(
     db: Session,
-    client_id: int,
     feed_type: str,
     day: datetime,
-    bag_weight_grams: int | None = None,
-) -> float:
+    bag_weight_grams: int | None = None) -> float:
     normalized_feed_type = _normalize_feed_type(feed_type)
     if not normalized_feed_type:
         return 0.0
     query = select(FeedStock).where(
-        FeedStock.client_id == client_id,
-        func.lower(func.trim(FeedStock.feed_type)) == normalized_feed_type.lower(),
-        FeedStock.date < day,
-    )
+        FeedStock.feed_type == normalized_feed_type,
+        FeedStock.date < day)
     if bag_weight_grams is None:
         query = query.where(FeedStock.bag_weight_grams.is_(None))
     else:
@@ -297,55 +344,103 @@ def _latest_feed_closing(
     return float(latest.closing_stock if latest else 0)
 
 
+# Handle latest feed closing any.
+
+def _latest_feed_closing_any(
+    db: Session,
+    feed_type: str,
+    bag_weight_grams: int | None) -> float:
+    normalized_feed_type = _normalize_feed_type(feed_type)
+    if not normalized_feed_type:
+        return 0.0
+
+    query = select(FeedStock).where(
+        FeedStock.feed_type == normalized_feed_type)
+    normalized_bag_weight = _normalize_bag_weight_key(bag_weight_grams)
+    if normalized_bag_weight is None:
+        query = query.where(FeedStock.bag_weight_grams.is_(None))
+    else:
+        query = query.where(FeedStock.bag_weight_grams == normalized_bag_weight)
+
+    latest = (
+        db.execute(query.order_by(FeedStock.date.desc(), FeedStock.id.desc()).limit(1))
+        .scalars()
+        .one_or_none()
+    )
+    return float(latest.closing_stock if latest else 0)
+
+
+# Get or create rm row.
+
 def _get_or_create_rm_row(
     db: Session,
-    client_id: int,
     rm_name: str,
-    date: datetime,
-) -> RMStockLedger:
+    date: datetime) -> RMStockLedger:
     day = _start_of_day(date)
     row = db.execute(
         select(RMStockLedger).where(
-            RMStockLedger.client_id == client_id,
             RMStockLedger.rm_name == rm_name,
-            RMStockLedger.date == day,
-        )
+            RMStockLedger.date == day)
     ).scalars().one_or_none()
     if row:
         return row
 
-    opening = _latest_rm_closing(db=db, client_id=client_id, rm_name=rm_name, day=day)
+    opening = _latest_rm_closing(db=db, rm_name=rm_name, day=day)
     row = RMStockLedger(
-        client_id=client_id,
         date=day,
         rm_name=rm_name,
         opening_stock=opening,
         received=0,
         consumption=0,
-        closing_stock=opening,
-    )
+        closing_stock=opening)
     db.add(row)
     db.flush()
     return row
 
 
+# Get or create rm stock row.
+
+def _get_or_create_rm_stock_row(
+    db: Session,
+    rm_name: str) -> RawMaterialStock:
+    normalized_rm_name = _normalize_rm_name(rm_name)
+    if not normalized_rm_name:
+        raise ValueError("rm_name is required")
+
+    row = db.execute(
+        select(RawMaterialStock).where(
+            RawMaterialStock.rm_name == normalized_rm_name)
+    ).scalars().one_or_none()
+    if row:
+        return row
+
+    opening = _latest_rm_closing_any(
+        db=db,
+        rm_name=normalized_rm_name)
+    row = RawMaterialStock(
+        rm_name=normalized_rm_name,
+        quantity=opening,
+        last_modified_at=datetime.utcnow())
+    db.add(row)
+    db.flush()
+    return row
+
+
+# Get or create feed row.
+
 def _get_or_create_feed_row(
     db: Session,
-    client_id: int,
     feed_type: str,
     date: datetime,
-    bag_weight_grams: int | None = None,
-) -> FeedStock:
+    bag_weight_grams: int | None = None) -> FeedStock:
     normalized_feed_type = _normalize_feed_type(feed_type)
     if not normalized_feed_type:
         raise ValueError("feed_type is required")
 
     day = _start_of_day(date)
     query = select(FeedStock).where(
-        FeedStock.client_id == client_id,
-        func.lower(func.trim(FeedStock.feed_type)) == normalized_feed_type.lower(),
-        FeedStock.date == day,
-    )
+        FeedStock.feed_type == normalized_feed_type,
+        FeedStock.date == day)
     if bag_weight_grams is None:
         query = query.where(FeedStock.bag_weight_grams.is_(None))
     else:
@@ -357,39 +452,78 @@ def _get_or_create_feed_row(
 
     opening = _latest_feed_closing(
         db=db,
-        client_id=client_id,
         feed_type=normalized_feed_type,
         day=day,
-        bag_weight_grams=bag_weight_grams,
-    )
+        bag_weight_grams=bag_weight_grams)
     row = FeedStock(
-        client_id=client_id,
         date=day,
         feed_type=normalized_feed_type,
         bag_weight_grams=bag_weight_grams,
         opening_stock=opening,
         produced=0,
         dispatched=0,
-        closing_stock=opening,
-    )
+        closing_stock=opening)
     db.add(row)
     db.flush()
     return row
 
 
+# Get or create feed current row.
+
+def _get_or_create_feed_current_row(
+    db: Session,
+    feed_type: str,
+    bag_weight_grams: int | None = None) -> FeedStockCurrent:
+    normalized_feed_type = _normalize_feed_type(feed_type)
+    if not normalized_feed_type:
+        raise ValueError("feed_type is required")
+
+    normalized_bag_weight = _normalize_bag_weight_key(bag_weight_grams)
+    query = select(FeedStockCurrent).where(
+        FeedStockCurrent.feed_type == normalized_feed_type)
+    if normalized_bag_weight is None:
+        query = query.where(FeedStockCurrent.bag_weight_grams.is_(None))
+    else:
+        query = query.where(FeedStockCurrent.bag_weight_grams == normalized_bag_weight)
+
+    row = (
+        db.execute(query.order_by(FeedStockCurrent.id.desc()).limit(1))
+        .scalars()
+        .one_or_none()
+    )
+    if row:
+        return row
+
+    opening = _latest_feed_closing_any(
+        db=db,
+        feed_type=normalized_feed_type,
+        bag_weight_grams=normalized_bag_weight)
+    row = FeedStockCurrent(
+        feed_type=normalized_feed_type,
+        bag_weight_grams=normalized_bag_weight,
+        quantity=opening,
+        last_modified_at=datetime.utcnow())
+    db.add(row)
+    db.flush()
+    return row
+
+
+# Add rm received.
+
 def add_rm_received(
     db: Session,
-    client_id: int,
     rm_name: str,
     quantity: float,
     date: datetime,
-) -> None:
+    update_snapshot: bool = True) -> None:
+    normalized_rm_name = _normalize_rm_name(rm_name)
+    if not normalized_rm_name:
+        raise ValueError("rm_name is required")
+
     row = _get_or_create_rm_row(
         db=db,
-        client_id=client_id,
-        rm_name=rm_name,
-        date=date,
-    )
+        rm_name=normalized_rm_name,
+        date=date)
     row.received = float(row.received or 0) + float(quantity)
     row.closing_stock = (
         float(row.opening_stock or 0)
@@ -397,33 +531,45 @@ def add_rm_received(
         - float(row.consumption or 0)
     )
 
+    if update_snapshot:
+        current_row = _get_or_create_rm_stock_row(
+            db=db,
+            rm_name=normalized_rm_name)
+        current_row.quantity = float(row.closing_stock or 0)
+        current_row.last_modified_at = datetime.utcnow()
+
+
+# Add rm consumption.
 
 def add_rm_consumption(
     db: Session,
-    client_id: int,
     rm_name: str,
     quantity: float,
     date: datetime,
-) -> None:
+    update_snapshot: bool = True) -> None:
     qty = float(quantity)
     if qty <= 0:
         raise ValueError(f"Consumption quantity for {rm_name} must be greater than 0")
 
+    normalized_rm_name = _normalize_rm_name(rm_name)
+    if not normalized_rm_name:
+        raise ValueError("rm_name is required")
+
     row = _get_or_create_rm_row(
         db=db,
-        client_id=client_id,
-        rm_name=rm_name,
-        date=date,
-    )
-    available = (
-        float(row.opening_stock or 0)
-        + float(row.received or 0)
-        - float(row.consumption or 0)
-    )
-    if qty > available:
-        raise ValueError(
-            f"Insufficient raw material stock for {rm_name}. Available: {available}"
-        )
+        rm_name=normalized_rm_name,
+        date=date)
+    current_row = None
+    available = None
+    if update_snapshot:
+        current_row = _get_or_create_rm_stock_row(
+            db=db,
+            rm_name=normalized_rm_name)
+        available = float(current_row.quantity or 0)
+        if qty > available:
+            raise ValueError(
+                f"Insufficient raw material stock for {normalized_rm_name}. Available: {available}"
+            )
 
     row.consumption = float(row.consumption or 0) + qty
     row.closing_stock = (
@@ -432,26 +578,28 @@ def add_rm_consumption(
         - float(row.consumption or 0)
     )
 
+    if update_snapshot and current_row is not None:
+        current_row.quantity = float(row.closing_stock or 0)
+        current_row.last_modified_at = datetime.utcnow()
+
+
+# Add feed produced.
 
 def add_feed_produced(
     db: Session,
-    client_id: int,
     feed_type: str,
     quantity: float,
     date: datetime,
-    weight_per_bag: float | int | None = None,
-) -> None:
+    weight_per_bag: float | int | None = None) -> None:
     normalized_feed_type = _normalize_feed_type(feed_type)
     if not normalized_feed_type:
         raise ValueError("feed_type is required")
     bag_weight_grams = _normalize_bag_weight_grams(weight_per_bag)
     row = _get_or_create_feed_row(
         db=db,
-        client_id=client_id,
         feed_type=normalized_feed_type,
         date=date,
-        bag_weight_grams=bag_weight_grams,
-    )
+        bag_weight_grams=bag_weight_grams)
     row.produced = float(row.produced or 0) + float(quantity)
     row.closing_stock = (
         float(row.opening_stock or 0)
@@ -459,15 +607,22 @@ def add_feed_produced(
         - float(row.dispatched or 0)
     )
 
+    current_row = _get_or_create_feed_current_row(
+        db=db,
+        feed_type=normalized_feed_type,
+        bag_weight_grams=bag_weight_grams)
+    current_row.quantity = float(row.closing_stock or 0)
+    current_row.last_modified_at = datetime.utcnow()
+
+
+# Add feed dispatched.
 
 def add_feed_dispatched(
     db: Session,
-    client_id: int,
     feed_type: str,
     quantity: float,
     date: datetime,
-    weight_per_bag: float | int | None = None,
-) -> None:
+    weight_per_bag: float | int | None = None) -> None:
     qty = float(quantity)
     normalized_feed_type = _normalize_feed_type(feed_type)
     if not normalized_feed_type:
@@ -479,16 +634,14 @@ def add_feed_dispatched(
 
     row = _get_or_create_feed_row(
         db=db,
-        client_id=client_id,
         feed_type=normalized_feed_type,
         date=date,
-        bag_weight_grams=bag_weight_grams,
-    )
-    available = (
-        float(row.opening_stock or 0)
-        + float(row.produced or 0)
-        - float(row.dispatched or 0)
-    )
+        bag_weight_grams=bag_weight_grams)
+    current_row = _get_or_create_feed_current_row(
+        db=db,
+        feed_type=normalized_feed_type,
+        bag_weight_grams=bag_weight_grams)
+    available = float(current_row.quantity or 0)
     if qty > available:
         raise ValueError(
             f"Insufficient stock for {variant_label}. Available: {available}"
@@ -501,16 +654,24 @@ def add_feed_dispatched(
         - float(row.dispatched or 0)
     )
 
+    current_row.quantity = float(row.closing_stock or 0)
+    current_row.last_modified_at = datetime.utcnow()
 
-def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
+
+# Rebuild rm stock ledger.
+
+def rebuild_rm_stock_ledger(db: Session) -> None:
     # Rebuild complete RM ledger from RM inward entries + production consumption.
     existing_rows = (
-        db.execute(select(RMStockLedger).where(RMStockLedger.client_id == client_id))
+        db.execute(select(RMStockLedger))
         .scalars()
         .all()
     )
     for row in existing_rows:
-        db.delete(row)
+        row.opening_stock = 0
+        row.received = 0
+        row.consumption = 0
+        row.closing_stock = 0
     db.flush()
 
     rm_entries = (
@@ -518,9 +679,8 @@ def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
             select(
                 RawMaterialEntry.date,
                 RawMaterialEntry.rm_type,
-                RawMaterialEntry.total_weight,
-            )
-            .where(RawMaterialEntry.client_id == client_id)
+                RawMaterialEntry.total_weight)
+            
             .order_by(RawMaterialEntry.date.asc(), RawMaterialEntry.id.asc())
         )
         .all()
@@ -528,11 +688,10 @@ def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
     for date, rm_type, total_weight in rm_entries:
         add_rm_received(
             db=db,
-            client_id=client_id,
             rm_name=rm_type,
             quantity=float(total_weight),
             date=date,
-        )
+            update_snapshot=False)
 
     consumption_rows = (
         db.execute(
@@ -543,15 +702,13 @@ def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
                 ProductionBatch.batch_size,
                 ProductionBatch.hmi_completed_count,
                 ProductionBatch.hmi_status,
-                ProductionBatch.rm_shortage_flag,
-            )
+                ProductionBatch.rm_shortage_flag)
             .join(ProductionBatch, ProductionBatch.id == ProductionBatchMaterial.batch_id)
-            .where(ProductionBatch.client_id == client_id)
+            
             .order_by(
                 ProductionBatch.date.asc(),
                 ProductionBatch.id.asc(),
-                ProductionBatchMaterial.id.asc(),
-            )
+                ProductionBatchMaterial.id.asc())
         )
         .all()
     )
@@ -562,38 +719,112 @@ def rebuild_rm_stock_ledger(db: Session, client_id: int) -> None:
         batch_size,
         hmi_completed_count,
         hmi_status,
-        rm_shortage_flag,
-    ) in consumption_rows:
+        rm_shortage_flag) in consumption_rows:
         effective_count = resolve_effective_batch_run_count(
             batch_size=batch_size,
             hmi_completed_count=hmi_completed_count,
             hmi_status=hmi_status,
-            rm_shortage_flag=rm_shortage_flag,
-        )
+            rm_shortage_flag=rm_shortage_flag)
         consumption_quantity = calculate_rm_consumption_quantity(
             per_batch_quantity=quantity,
-            batch_run_count=effective_count,
-        )
+            batch_run_count=effective_count)
         if consumption_quantity <= 0:
             continue
         add_rm_consumption(
             db=db,
-            client_id=client_id,
             rm_name=rm_name,
             quantity=consumption_quantity,
             date=date,
+            update_snapshot=False)
+
+    # Rebuild the snapshot from the final ledger state so the current table
+    # always matches the authoritative closing balances exactly.
+    rebuild_rm_stock_snapshot(db=db)
+
+
+# Synchronize current RM stock rows with the latest ledger balances.
+
+def rebuild_rm_stock_snapshot(db: Session) -> None:
+    latest_rows = (
+        db.execute(
+            select(RMStockLedger)
+            
+            .order_by(
+                RMStockLedger.rm_name.asc(),
+                RMStockLedger.date.desc(),
+                RMStockLedger.id.desc())
         )
+        .scalars()
+        .all()
+    )
+
+    latest_by_name: dict[str, float] = {}
+    for row in latest_rows:
+        rm_name = _normalize_rm_name(row.rm_name)
+        if not rm_name or rm_name in latest_by_name:
+            continue
+        latest_by_name[rm_name] = float(row.closing_stock or 0)
+
+    existing_rows = (
+        db.execute(select(RawMaterialStock))
+        .scalars()
+        .all()
+    )
+    existing_by_name: dict[str, RawMaterialStock] = {}
+    for row in existing_rows:
+        rm_name = _normalize_rm_name(row.rm_name)
+        if not rm_name or rm_name in existing_by_name:
+            continue
+        existing_by_name[rm_name] = row
+
+    now = datetime.utcnow()
+    for rm_name, quantity in latest_by_name.items():
+        row = existing_by_name.get(rm_name)
+        if row is None:
+            db.add(
+                RawMaterialStock(
+                    rm_name=rm_name,
+                    quantity=quantity,
+                    created_at=now,
+                    last_modified_at=now)
+            )
+            continue
+        row.quantity = quantity
+        row.last_modified_at = now
+
+    for rm_name, row in existing_by_name.items():
+        if rm_name in latest_by_name:
+            continue
+        row.quantity = 0
+        row.last_modified_at = now
+
+    db.flush()
 
 
-def rebuild_feed_stock_ledger(db: Session, client_id: int) -> None:
+# Rebuild feed stock ledger.
+
+def rebuild_feed_stock_ledger(db: Session) -> None:
     # Rebuild complete feed ledger from production output + dispatch entries.
     existing_rows = (
-        db.execute(select(FeedStock).where(FeedStock.client_id == client_id))
+        db.execute(select(FeedStock))
         .scalars()
         .all()
     )
     for row in existing_rows:
-        db.delete(row)
+        row.opening_stock = 0
+        row.produced = 0
+        row.dispatched = 0
+        row.closing_stock = 0
+    db.flush()
+
+    current_rows = (
+        db.execute(select(FeedStockCurrent))
+        .scalars()
+        .all()
+    )
+    for row in current_rows:
+        row.quantity = 0
+        row.last_modified_at = datetime.utcnow()
     db.flush()
 
     produced_rows = (
@@ -602,12 +833,9 @@ def rebuild_feed_stock_ledger(db: Session, client_id: int) -> None:
                 ProductionBatch.date,
                 ProductionBatch.product_name,
                 ProductionBatch.weight_per_bag,
-                ProductionBatch.output,
-            )
+                ProductionBatch.output)
             .where(
-                ProductionBatch.client_id == client_id,
-                ProductionBatch.stock_posted.is_(True),
-            )
+                ProductionBatch.stock_posted.is_(True))
             .order_by(ProductionBatch.date.asc(), ProductionBatch.id.asc())
         )
         .all()
@@ -615,12 +843,10 @@ def rebuild_feed_stock_ledger(db: Session, client_id: int) -> None:
     for date, product_name, weight_per_bag, output in produced_rows:
         add_feed_produced(
             db=db,
-            client_id=client_id,
             feed_type=product_name,
             quantity=float(output),
             date=date,
-            weight_per_bag=weight_per_bag,
-        )
+            weight_per_bag=weight_per_bag)
 
     dispatch_rows = (
         db.execute(
@@ -628,10 +854,9 @@ def rebuild_feed_stock_ledger(db: Session, client_id: int) -> None:
                 DispatchEntry.date,
                 DispatchProduct.product_type,
                 DispatchProduct.weight_per_bag,
-                DispatchProduct.total_weight,
-            )
-            .join(DispatchProduct, DispatchProduct.dispatch_id == DispatchEntry.id)
-            .where(DispatchEntry.client_id == client_id)
+                DispatchProduct.total_weight)
+            .join(DispatchProduct, DispatchProduct.dispatch_code == DispatchEntry.dispatch_code)
+            
             .order_by(DispatchEntry.date.asc(), DispatchEntry.id.asc())
         )
         .all()
@@ -642,9 +867,75 @@ def rebuild_feed_stock_ledger(db: Session, client_id: int) -> None:
         ledger_date = date + IST_OFFSET
         add_feed_dispatched(
             db=db,
-            client_id=client_id,
             feed_type=product_type,
             quantity=float(total_weight),
             date=ledger_date,
-            weight_per_bag=weight_per_bag,
+            weight_per_bag=weight_per_bag)
+
+    rebuild_feed_stock_snapshot(db=db)
+
+
+# Rebuild current feed stock rows from the latest feed ledger balances.
+
+def rebuild_feed_stock_snapshot(db: Session) -> None:
+    existing_rows = (
+        db.execute(select(FeedStockCurrent))
+        .scalars()
+        .all()
+    )
+    latest_rows = (
+        db.execute(
+            select(FeedStock)
+            
+            .order_by(
+                FeedStock.feed_type.asc(),
+                FeedStock.bag_weight_grams.asc(),
+                FeedStock.date.desc(),
+                FeedStock.id.desc())
         )
+        .scalars()
+        .all()
+    )
+
+    existing_by_key: dict[tuple[str, int | None], FeedStockCurrent] = {}
+    for row in existing_rows:
+        feed_type = _normalize_feed_type(row.feed_type)
+        bag_weight_grams = _normalize_bag_weight_key(row.bag_weight_grams)
+        if not feed_type:
+            continue
+        existing_by_key[(feed_type, bag_weight_grams)] = row
+
+    latest_by_key: dict[tuple[str, int | None], float] = {}
+    now = datetime.utcnow()
+    for row in latest_rows:
+        feed_type = _normalize_feed_type(row.feed_type)
+        bag_weight_grams = _normalize_bag_weight_key(row.bag_weight_grams)
+        if not feed_type:
+            continue
+        key = (feed_type, bag_weight_grams)
+        if key in latest_by_key:
+            continue
+        latest_by_key[key] = float(row.closing_stock or 0)
+
+    for key, quantity in latest_by_key.items():
+        row = existing_by_key.get(key)
+        if row is None:
+            db.add(
+                FeedStockCurrent(
+                    feed_type=key[0],
+                    bag_weight_grams=key[1],
+                    quantity=quantity,
+                    created_at=now,
+                    last_modified_at=now)
+            )
+            continue
+        row.quantity = quantity
+        row.last_modified_at = now
+
+    for key, row in existing_by_key.items():
+        if key in latest_by_key:
+            continue
+        row.quantity = 0
+        row.last_modified_at = now
+
+    db.flush()

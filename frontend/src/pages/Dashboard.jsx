@@ -18,6 +18,8 @@ import live from "./assets/live.png";
 import raw from "./assets/raw.png";
 import truck from "./assets/truck.png";
 import corn from "./assets/corn.png";
+
+// Overview dashboard for machine, stock, production, and dispatch status.
 import largegoods from "./assets/bags.png";
 
 import {
@@ -38,11 +40,11 @@ import {
 const chartColors = {
   temp: "#FF0000",
   humidity: "#06b6d4",
-  condTemp: "#059669",
-  baggingTemp: "#ea580c",
+  condTemp: "#D100D1",
+  baggingTemp: "#FFC300",
   feederSpeed: "#7c3aed",
-  pressureBefore: "#0d9488",
-  pressureAfter: "#ca8a04",
+  pressureBefore: "#FF5F15",
+  pressureAfter: "#2F5D9F",
   feederLoad: "#0f766e",
 };
 
@@ -226,7 +228,7 @@ export default function Dashboard() {
     })
     .filter(Boolean)
     .sort((a, b) => a._ts - b._ts);
-
+//R
   const graphData = graphRows.map((d) => ({
     time: d.recorded_at ? formatTime24IST(d.recorded_at, "") : "",
     temp: d.ambient_temp ?? 0,
@@ -309,7 +311,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
   const avgPressureBefore = calculateAvg("pressureBefore");
   const avgPressureAfter = calculateAvg("pressureAfter");
   const activeBatch = machineStatus?.active_batch || null;
-  const activeRunStatus = (activeBatch?.run_status || "pending").toLowerCase();
+  const activeRunStatus = (activeBatch?.run_status || "stopped").toLowerCase();
   const activeMaterials = Array.isArray(activeBatch?.materials)
     ? activeBatch.materials
     : [];
@@ -384,13 +386,34 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
       buttonBottom: "#7e1a12",
       texture: "url('/textures/chalk.png')",
       icon: largegoods,
-      download: () => stockApi.downloadFeedIndividual("pdf"),
+      download: () => stockApi.downloadFeed("pdf"),
       fileName: "finished_goods_available_stock.pdf",
     },
   ];
+  const fallbackData = Array.from({ length: 12 }, (_, i) => {
+  const minutesAgo = (11 - i) * 5;
+  const time = new Date(Date.now() - minutesAgo * 60000);
 
+ 
+  return {
+    time: formatTime24IST(time, ""),
+    temp: 0,
+    humidity: 0,
+    condTemp: 0,
+    baggingTemp: 0,
+    feederSpeed: 0,
+    pelletMotorLoad: 0,
+    pressureBefore: 0,
+    pressureAfter: 0,
+  };
+});
+const chartData = fallbackData.map((item, index) => ({
+  ...item,
+  index,
+}));
   return (
-    <div className="space-y-6 ">
+    <div className="space-y-6 pb-2 md:pb-28 lg:pb-0">
+
       {/* Page title ,Machine Running Status */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 ">
         <div className="flex flex-col items-center gap-4 sm:gap-0 sm:flex-row justify-between sm:items-center w-full">
@@ -439,14 +462,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
             <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wider">
               Product & Batch
             </h2>
-            {/* <div className="text-right flex justify-center  align-center items-center gap-2">
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                Batch Count:
-              </p>
-              <p className="mt-1 inline-flex items-center rounded-md px-2.5 py-1 text-sm font-bold bg-slate-100 text-slate-800">
-                {activeProgressLabel}
-              </p>
-            </div> */}
+
        
           </div>
 
@@ -459,8 +475,8 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                   {activeBatchLabel}
                 </p>
               </div>
-            <span
-  className={`px-2 py-1 md:px-2.5 md:py-1.5 
+         <span
+  className={`inline-flex items-center gap-2 px-2 py-1 md:px-2.5 md:py-1.5 
   text-[10px] sm:text-xs md:text-sm 
   rounded-md font-semibold 
   whitespace-nowrap
@@ -474,6 +490,19 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
       : "bg-slate-100 text-slate-700"
   }`}
 >
+  {/* DOT */}
+  <span
+    className={`inline-block w-2 h-2 md:w-2.5 md:h-2.5 rounded-full ${
+      activeRunStatus === "running"
+        ? "bg-emerald-600 animate-pulse"
+        : activeRunStatus === "completed"
+        ? "bg-blue-600"
+        : activeRunStatus === "stopped"
+        ? "bg-red-600"
+        : "bg-gray-400"
+    }`}
+  />
+ 
   {activeRunStatus.toUpperCase()}
 </span>
             </div>
@@ -484,7 +513,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
     <p className="text-xs text-slate-500 font-semibold">
       Running Product
     </p>
-    <p className="mt-1 text-xl md:text-2xl font-semibold text-[#245658] tracking-wide leading-normal">
+    <p className="mt-1 text-xl md:text-2xl font-semibold text-[#245658] break-all tracking-wide leading-normal">
       {activeBatch?.product_name || "N/A"}
     </p>
   </div>
@@ -520,10 +549,10 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
    <div className="lg:mt-1">
   <button
     onClick={() => setShowRecipePopup(true)}
-    className="mt-4 px-4 py-2  bg-[#245658] font-bold text-white rounded text-sm flex items-center gap-2"
+    className="mt-4 px-4 py-2  bg-[#245658] font-bold text-white rounded text-sm flex items-center gap-2 "
   >
   
-    <span>View Recipe</span>
+    <span>View Active Recipe</span>
   </button>
 </div>
           </div>
@@ -565,12 +594,12 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                 key={idx}
                 className="flex justify-between border rounded px-3 py-2 text-sm"
               >
-                <span className="font-medium text-slate-700">
+                <span className="font-medium text-slate-700 break-all">
                   {item.rm_name}
                 </span>
 
                 <span className="text-slate-600">
-                  {item.quantity} kg
+                  {item.quantity} kg /batch
                 </span>
               </div>
             ))}
@@ -628,7 +657,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                 <span>Ambient</span>
               </div>
               <span className="font-semibold text-slate-800 tabular-nums">
-                {sensorDisplay(plcData?.ambient_temp, "C")}
+                {sensorDisplay(plcData?.ambient_temp, "°C")}
               </span>
             </div>
 
@@ -653,7 +682,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                 <span>Conditioner Temperature</span>
               </div>
               <span className="font-semibold text-slate-800 tabular-nums">
-                {sensorDisplay(plcData?.conditioner_temp, "C")}
+                {sensorDisplay(plcData?.conditioner_temp, "°C")}
               </span>
             </div>
               <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
@@ -662,7 +691,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                 <span>Bagging Temperature</span>
               </div>
               <span className="font-semibold text-slate-800 tabular-nums">
-                {sensorDisplay(plcData?.bagging_temp, "C")}
+                {sensorDisplay(plcData?.bagging_temp, "°C")}
               </span>
             </div>
              <div className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-lg border border-slate-400">
@@ -966,7 +995,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                   <XAxis
                     dataKey="time"
                     label={{
-                                value: "Time ",        
+                                value: "Time (Last 1 hour)",        
                                 position: "insideBottom",
                                 offset: -5,            
                                 style: {
@@ -1050,8 +1079,88 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
-              <div className="h-full flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-600 px-4 text-center">
-                
+             <div className="h-full flex items-center justify-center rounded-lg  text-xs text-slate-600 px-4 text-center">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={fallbackData}>
+                 {/* Grid */}
+                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+
+                        {/* X Axis */}
+                         <XAxis
+                        dataKey={chartData.index}      
+                        type="number"
+                        domain={[0, chartData.length ]}
+                        tickCount={5}       
+                        tickFormatter={() => "hh:mm:ss"} 
+                        axisLine={true}
+                        tickLine={true}
+                        stroke="#64748b"
+                        fontSize={11}
+                        tick={{ fill: "#64748b" }}
+                        label={{
+                          value: "Time (Last 1 hour)",
+                          position: "insideBottom",
+                          offset: -5,
+                          style: { fontSize: 12, fill: "#475569" },
+                        }}
+                      />
+
+                      {/* Y Axis */}
+                      <YAxis
+                        domain={[0, 100]}
+                        ticks={fixedTicks(100)}
+                        interval={0}
+                        stroke="#64748b"
+                        width={40}
+                        fontSize={11}
+                        tick={{ fill: "#64748b" }}
+                        label={{
+                          value: "Temperature (°C) / Humidity (%)",
+                          angle: -90,
+                          dx: -5,
+                          position: "insideLeft",
+                          style: { textAnchor: "middle", fontSize: 10 },
+                        }}
+                      />
+                    <Tooltip
+                      content={({ label }) => (
+                        <div
+                          style={{
+                            background: "#fff",
+                            border: "1px solid #e2e8f0",
+                            padding: "10px",
+                            borderRadius: "6px",
+                            fontSize: "12px",
+                          }}
+                        >
+                    <p className="font-semibold mb-1">hh:mm:ss</p>
+                    <div className="mt-2 border-t pt-1 text-red-500 font-semibold">
+                      Machine is OFF
+                    </div>
+                  </div>
+                )}
+               />
+          <Area
+            type="monotone"
+            dataKey="temp"
+            stroke={chartColors.temp}   
+            strokeWidth={0}             
+            fill={chartColors.temp}
+            name="Temperature °C"
+          />
+
+          <Area
+            type="monotone"
+            dataKey="humidity"
+            stroke={chartColors.humidity}
+            strokeWidth={0}
+            fill={chartColors.humidity}
+            name="Humidity %"
+          />
+          <Legend wrapperStyle={{ fontSize: "12px", paddingTop: 10 }} />
+            </AreaChart>
+            
+</ResponsiveContainer>
               </div>
             )}
           </div>
@@ -1083,7 +1192,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
                        label={{
-                                value: "Time ",        
+                                value: "Time (Last 1 hour)",        
                                 position: "insideBottom",
                                 offset: -5,            
                                 style: {
@@ -1165,7 +1274,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                   </defs>
                   <ReferenceLine
                     y={avgCondTemp}
-                    stroke="#16a34a"
+                    stroke="#D100D1"
                     strokeDasharray="6 4"
                     strokeWidth={2}
                     label={{
@@ -1178,7 +1287,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
 
                   <ReferenceLine
                     y={avgBaggingTemp}
-                    stroke="#f97316"
+                    stroke="#FFC300"
                     strokeDasharray="6 4"
                     strokeWidth={2}
                     label={{
@@ -1191,9 +1300,94 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
-              <div className="h-full flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-600 px-4 text-center">
-                
-              </div>
+                     <div className="h-full flex items-center justify-center text-xs text-slate-600 px-4 text-center">
+  <ResponsiveContainer width="100%" height="100%">
+    <AreaChart data={fallbackData}>
+
+    
+
+      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+
+          <XAxis
+                        dataKey={chartData.index}      
+                        type="number"
+                        domain={[0, chartData.length ]}
+                        tickCount={5}       
+                        tickFormatter={() => "hh:mm:ss"} 
+                        axisLine={true}
+                        tickLine={true}
+                        stroke="#64748b"
+                        fontSize={11}
+                        tick={{ fill: "#64748b" }}
+                        label={{
+                          value: "Time (Last 1 hour)",
+                          position: "insideBottom",
+                          offset: -5,
+                          style: { fontSize: 12, fill: "#475569" },
+                        }}
+                      />
+
+      <YAxis
+        domain={[0, 250]}
+        ticks={fixedTicks(250)}
+        interval={0}
+        stroke="#64748b"
+        width={40}
+        fontSize={11}
+        tick={{ fill: "#64748b" }}
+        label={{
+          value: "Conditioner / Bagging (°C)",
+          angle: -90,
+          dx: -5,
+          position: "insideLeft",
+          style: { textAnchor: "middle", fontSize: 10 }
+        }}
+      />
+
+     <Tooltip
+                      content={({ label }) => (
+                        <div
+                          style={{
+                            background: "#fff",
+                            border: "1px solid #e2e8f0",
+                            padding: "10px",
+                            borderRadius: "6px",
+                            fontSize: "12px",
+                          }}
+                        >
+                    <p className="font-semibold mb-1">hh:mm:ss</p>
+                    <div className="mt-2 border-t pt-1 text-red-500 font-semibold">
+                      Machine is OFF
+                    </div>
+        </div>
+      )} />
+
+      <Legend wrapperStyle={{ fontSize: "12px", paddingTop: 10 }} />
+
+   <Area
+  type="monotone"
+  dataKey="condTemp"
+  stroke={chartColors.condTemp}    
+  strokeWidth={0}             
+  fill={chartColors.condTemp}
+  name="Conditioner Temperature °C"
+
+/>
+      <Area
+        type="monotone"
+        dataKey="baggingTemp"
+        stroke={chartColors.baggingTemp}
+        strokeWidth={0}
+        fill={chartColors.baggingTemp}
+        name="Bagging Temperature °C"
+     
+      />
+
+     
+
+    </AreaChart>
+  </ResponsiveContainer>
+</div>
             )}
           </div>
         </div>
@@ -1251,7 +1445,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
                      label={{
-                                value: "Time ",        
+                                value: "Time (Last 1 hour)",        
                                 position: "insideBottom",
                                 offset: -5,            
                                 style: {
@@ -1347,9 +1541,116 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
-              <div className="h-full flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-600 px-4 text-center">
-                
-              </div>
+                 <div className="h-full flex items-center justify-center text-xs text-slate-600 px-4 text-center">
+  <ResponsiveContainer width="100%" height="100%">
+    <AreaChart data={fallbackData}>
+
+   
+
+      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+
+        <XAxis
+                        dataKey={chartData.index}      
+                        type="number"
+                        domain={[0, chartData.length ]}
+                        tickCount={5}       
+                        tickFormatter={() => "hh:mm:ss"} 
+                        axisLine={true}
+                        tickLine={true}
+                        stroke="#64748b"
+                        fontSize={11}
+                        tick={{ fill: "#64748b" }}
+                        label={{
+                          value: "Time (Last 1 hour)",
+                          position: "insideBottom",
+                          offset: -5,
+                          style: { fontSize: 12, fill: "#475569" },
+                        }}
+                      />
+
+      <YAxis
+        yAxisId="left"
+        domain={[0, 1500]}
+        ticks={fixedTicks(1500)}
+        interval={0}
+        width={45}
+        stroke="#64748b"
+        fontSize={11}
+        tick={{ fill: "#64748b" }}
+        label={{
+          value: "Pellet Feeder Speed (rpm)",
+          angle: -90,
+          dx: -5,
+          position: "insideLeft",
+          style: { textAnchor: "middle", fontSize: 10 }
+        }}
+      />
+
+      <YAxis
+        yAxisId="right"
+        orientation="right"
+        domain={[0, 300]}
+        ticks={fixedTicks(300)}
+        interval={0}
+        width={36}
+        stroke="#64748b"
+        fontSize={11}
+        tick={{ fill: "#64748b" }}
+        label={{
+          value: "Pellet Feeder Load (amp)",
+          angle: 90,
+          position: "insideRight",
+          dx: 5,
+          style: { textAnchor: "middle", fontSize: 10 }
+        }}
+      />
+
+     <Tooltip
+                      content={({ label }) => (
+                        <div
+                          style={{
+                            background: "#fff",
+                            border: "1px solid #e2e8f0",
+                            padding: "10px",
+                            borderRadius: "6px",
+                            fontSize: "12px",
+                          }}
+                        >
+                    <p className="font-semibold mb-1">hh:mm:ss</p>
+                    <div className="mt-2 border-t pt-1 text-red-500 font-semibold">
+                      Machine is OFF
+                    </div>
+                  </div>
+      )} />
+
+      <Legend wrapperStyle={{ fontSize: "12px", paddingTop: 10 }} />
+
+      <Area
+        type="monotone"
+        dataKey="feederSpeed"
+        yAxisId="left"
+        stroke={chartColors.feederSpeed}
+        fill="url(#speedGrad)"
+        name="Pellet Feeder Speed (rpm)"
+        
+      />
+
+      <Area
+        type="monotone"
+        dataKey="pelletMotorLoad"
+        yAxisId="right"
+        stroke={chartColors.feederLoad}
+        fill="url(#loadGrad)"
+        name="Pellet Feeder Load (amp)"
+      
+      />
+
+      {/* <ReferenceLine yAxisId="left" y={0} stroke="#9333ea" strokeDasharray="6 4" />
+      <ReferenceLine yAxisId="right" y={0} stroke="#0f766e" strokeDasharray="6 4" /> */}
+
+    </AreaChart>
+  </ResponsiveContainer>
+</div>
             )}
           </div>
         </div>
@@ -1407,7 +1708,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                     fontSize={11}
                     tick={{ fill: "#64748b" }}
                       label={{
-                                value: "Time ",        
+                                value: "Time (Last 1 hour)",        
                                 position: "insideBottom",
                                 offset: -5,            
                                 style: {
@@ -1463,7 +1764,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                   />
                   <ReferenceLine
                     y={avgPressureBefore}
-                    stroke="#0d9488"
+                    stroke="#FF5F15"
                     strokeDasharray="6 4"
                     strokeWidth={2}
                     label={{
@@ -1476,7 +1777,7 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
 
                   <ReferenceLine
                     y={avgPressureAfter}
-                    stroke="#ca8a04"
+                    stroke="#2F5D9F"
                     strokeDasharray="6 4"
                     strokeWidth={2}
                     label={{
@@ -1489,9 +1790,93 @@ const [showRecipePopup, setShowRecipePopup] = useState(false)
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
-              <div className="h-full flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-600 px-4 text-center">
-                
-              </div>
+         <div className="h-full flex items-center justify-center text-xs text-slate-600 px-4 text-center">
+  <ResponsiveContainer width="100%" height="100%">
+    <AreaChart data={fallbackData}>
+
+     
+
+      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+
+      <XAxis
+                        dataKey={chartData.index}      
+                        type="number"
+                        domain={[0, chartData.length ]}
+                        tickCount={5}       
+                        tickFormatter={() => "hh:mm:ss"} 
+                        axisLine={true}
+                        tickLine={true}
+                        stroke="#64748b"
+                        fontSize={11}
+                        tick={{ fill: "#64748b" }}
+                        label={{
+                          value: "Time (Last 1 hour)",
+                          position: "insideBottom",
+                          offset: -5,
+                          style: { fontSize: 12, fill: "#475569" },
+                        }}
+                      />
+
+      <YAxis
+        domain={[0, 20]}
+        ticks={fixedTicks(20)}
+        interval={0}
+        width={40}
+        stroke="#64748b"
+        fontSize={11}
+        tick={{ fill: "#64748b" }}
+        label={{
+          value: "Pressure Before & After (bar)",
+          angle: -90,
+          dx: -6,
+          position: "insideLeft",
+          style: { textAnchor: "middle", fontSize: 10 }
+        }}
+      />
+
+          <Tooltip
+                      content={({ label }) => (
+                        <div
+                          style={{
+                            background: "#fff",
+                            border: "1px solid #e2e8f0",
+                            padding: "10px",
+                            borderRadius: "6px",
+                            fontSize: "12px",
+                          }}
+                        >
+                    <p className="font-semibold mb-1">hh:mm:ss</p>
+                    <div className="mt-2 border-t pt-1 text-red-500 font-semibold">
+                      Machine is OFF
+                    </div>
+        </div>
+      )} />
+
+      <Legend wrapperStyle={{ fontSize: "12px", paddingTop: 10 }} />
+
+      <Area
+        type="monotone"
+        dataKey="pressureBefore"
+        stroke={chartColors.pressureBefore}
+        fill="url(#beforeGrad)"
+        name="Pressure Before (bar)"
+    
+      />
+
+      <Area
+        type="monotone"
+        dataKey="pressureAfter"
+        stroke={chartColors.pressureAfter}
+        fill="url(#afterGrad)"
+        name="Pressure After (bar)"
+  
+      />
+
+      
+
+    </AreaChart>
+  </ResponsiveContainer>
+</div>
             )}
           </div>
         </div>

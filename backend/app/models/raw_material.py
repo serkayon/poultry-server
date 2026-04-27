@@ -5,6 +5,8 @@ from datetime import datetime
 from ..database import Base
 
 
+# Define RawMaterialType.
+
 class RawMaterialType(Base):
     __tablename__ = "raw_material_types"
 
@@ -14,11 +16,13 @@ class RawMaterialType(Base):
     last_modified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+# Define RawMaterialEntry.
+
 class RawMaterialEntry(Base):
     __tablename__ = "raw_material_entries"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    client_id: Mapped[int] = mapped_column(Integer)
+    entry_code: Mapped[str | None] = mapped_column(String(8), unique=True, index=True, nullable=True)
     date: Mapped[datetime] = mapped_column(DateTime)
     rm_type: Mapped[str] = mapped_column(String(100))
     supplier: Mapped[str] = mapped_column(String(255))
@@ -34,16 +38,21 @@ class RawMaterialEntry(Base):
     )
 
 
+# Define RawMaterialLabReport.
+
 class RawMaterialLabReport(Base):
     __tablename__ = "raw_material_lab_reports"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    entry_id: Mapped[int] = mapped_column(ForeignKey("raw_material_entries.id"), unique=True)
+    entry_code: Mapped[str] = mapped_column(
+        ForeignKey("raw_material_entries.entry_code"),
+        unique=True,
+        index=True,
+    )
     entry: Mapped["RawMaterialEntry"] = relationship("RawMaterialEntry", back_populates="lab_report")
 
     protein: Mapped[float | None] = mapped_column(Float, nullable=True)
     fat: Mapped[float | None] = mapped_column(Float, nullable=True)
-    nitrogen: Mapped[float | None] = mapped_column(Float, nullable=True)
     fiber: Mapped[float | None] = mapped_column(Float, nullable=True)
     ash: Mapped[float | None] = mapped_column(Float, nullable=True)
     calcium: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -62,3 +71,4 @@ class RawMaterialLabReport(Base):
     smell: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_modified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

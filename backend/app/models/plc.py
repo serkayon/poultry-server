@@ -5,13 +5,12 @@ from datetime import datetime
 from ..database import Base
 
 
+# Real-time PLC data (Modbus) - written by cloud/Modbus team; we only read via API.
+
 class PLCDataSnapshot(Base):
-    """Real-time PLC data (Modbus) - written by cloud/Modbus team; we only read via API."""
     __tablename__ = "plc_data_snapshots"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    # Client/plant identifier if multi-tenant
-    client_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     running_status: Mapped[bool] = mapped_column(Boolean, default=False)
     process_status: Mapped[int] = mapped_column(Integer, default=0)
@@ -29,8 +28,9 @@ class PLCDataSnapshot(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+# Single-row machine state controlled by HMI.
+
 class MachineState(Base):
-    """Single-row machine state controlled by HMI."""
 
     __tablename__ = "machine_state"
 

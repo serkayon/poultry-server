@@ -3,7 +3,7 @@ from .user import User
 from .raw_material import RawMaterialEntry, RawMaterialLabReport, RawMaterialType
 from .dispatch import DispatchEntry
 from .production import ProductionBatch, ProductionBatchMaterial, ProductionReport
-from .stock import FeedStock, RMStockLedger
+from .stock import FeedStock, FeedStockCurrent, RMStockLedger, RawMaterialStock
 from .plc import MachineState, PLCDataSnapshot
 
 __all__ = [
@@ -19,7 +19,9 @@ __all__ = [
     "ProductionBatchMaterial",
     "ProductionReport",
     "FeedStock",
+    "FeedStockCurrent",
     "RMStockLedger",
+    "RawMaterialStock",
     "PLCDataSnapshot",
     "MachineState",
 ]

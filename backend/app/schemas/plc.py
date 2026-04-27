@@ -3,6 +3,8 @@ from typing import Optional
 from datetime import datetime
 
 
+# Schema model for `PLCDataResponse` request/response payloads.
+
 class PLCDataResponse(BaseModel):
     id: int
     running_status: bool
@@ -17,6 +19,8 @@ class PLCDataResponse(BaseModel):
     pellet_feeder_speed: Optional[float] = None
     pellet_motor_load: Optional[float] = None
     recorded_at: datetime
+
+    # Enable ORM-to-schema attribute mapping for response models.
 
     class Config:
         from_attributes = True

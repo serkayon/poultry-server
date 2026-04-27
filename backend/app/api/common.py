@@ -1,3 +1,6 @@
+# Shared request/response helpers for the backend API layer.
+
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -13,15 +16,18 @@ from ..models.raw_material import RawMaterialEntry
 from ..models.user import User
 from ..services.auth import create_access_token, decode_token
 
-DEFAULT_CLIENT_ID = 1
 IST = timezone(timedelta(hours=5, minutes=30))
 
+
+# Return a naive-or-aware datetime normalized to UTC.
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 
+
+# Yield a database session with automatic commit and rollback handling.
 
 @contextmanager
 def db_session():
@@ -36,15 +42,21 @@ def db_session():
         db.close()
 
 
+# Serialize a datetime to an ISO-8601 UTC string.
+
 def dt(value: datetime | None) -> str | None:
     if value is None:
         return None
     return _as_utc(value).isoformat().replace("+00:00", "Z")
 
 
+# Return a standard JSON error response.
+
 def error(detail: str, status: int = 400):
     return jsonify({"detail": detail}), status
 
+
+# Parse an incoming datetime string into a naive UTC datetime.
 
 def parse_datetime(raw: str | None, field_name: str = "datetime") -> datetime | None:
     if raw in (None, ""):
@@ -58,12 +70,13 @@ def parse_datetime(raw: str | None, field_name: str = "datetime") -> datetime | 
         raise ValueError(f"Invalid {field_name}: {raw}") from exc
 
 
+# Resolve a dashboard/reporting period into UTC start and end bounds.
+
 def resolve_period_range(
     period: str | None,
     *,
     from_date_raw: str | None = None,
-    to_date_raw: str | None = None,
-) -> tuple[datetime, datetime]:
+    to_date_raw: str | None = None) -> tuple[datetime, datetime]:
     normalized = str(period or "").strip().lower()
 
     if normalized in {"custom"}:
@@ -109,12 +122,16 @@ def resolve_period_range(
     return from_date, to_date
 
 
+# Return a required payload field or raise a validation error.
+
 def required(payload: dict, field: str) -> str:
     value = payload.get(field)
     if value in (None, ""):
         raise ValueError(f"{field} is required")
     return value
 
+
+# Parse a numeric payload field and optionally require it.
 
 def parse_float(payload: dict, field: str, required_field: bool = False) -> float | None:
     value = payload.get(field)
@@ -128,12 +145,16 @@ def parse_float(payload: dict, field: str, required_field: bool = False) -> floa
         raise ValueError(f"{field} must be a number") from exc
 
 
+# Return the parsed JSON body for the current request.
+
 def json_body() -> dict:
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         raise ValueError("Request body must be a JSON object")
     return payload
 
+
+# Convert a user model into a response payload.
 
 def serialize_user(user: User) -> dict:
     return {
@@ -149,6 +170,8 @@ def serialize_user(user: User) -> dict:
     }
 
 
+# Build the login response with a bearer token and user payload.
+
 def token_response(user: User) -> dict:
     token = create_access_token({"sub": str(user.id), "role": user.role})
     return {
@@ -157,6 +180,8 @@ def token_response(user: User) -> dict:
         "user": serialize_user(user),
     }
 
+
+# Resolve the authenticated user from the Authorization header.
 
 def current_user(db) -> User:
     auth_header = request.headers.get("Authorization", "")
@@ -183,9 +208,14 @@ def current_user(db) -> User:
     return user
 
 
+# Serialize a raw material entry for list and detail responses.
+
 def serialize_raw_entry(entry: RawMaterialEntry, has_lab: bool) -> dict:
+    entry_code = str(getattr(entry, "entry_code", "") or "").strip()
+    if not entry_code:
+        entry_code = "RMX00000"
     return {
-        "id": entry.id,
+        "entry_code": entry_code,
         "date": dt(entry.date),
         "rm_type": entry.rm_type,
         "supplier": entry.supplier,
@@ -199,9 +229,14 @@ def serialize_raw_entry(entry: RawMaterialEntry, has_lab: bool) -> dict:
     }
 
 
+# Serialize a dispatch entry for API responses.
+
 def serialize_dispatch(entry: DispatchEntry) -> dict:
+    dispatch_code = str(getattr(entry, "dispatch_code", "") or "").strip()
+    if not dispatch_code:
+        dispatch_code = "DPX00000"
     return {
-        "id": entry.id,
+        "dispatch_code": dispatch_code,
         "date": dt(entry.date),
         "party_name": entry.party_name,
         "vehicle_no": entry.vehicle_no,
@@ -211,6 +246,8 @@ def serialize_dispatch(entry: DispatchEntry) -> dict:
         "created_at": dt(entry.created_at),
     }
 
+
+# Serialize a production batch and its runtime state.
 
 def serialize_batch(batch: ProductionBatch, has_report: bool, is_active: bool = False) -> dict:
     batch_no = batch.batch_no.strip() if isinstance(batch.batch_no, str) else ""
@@ -226,7 +263,7 @@ def serialize_batch(batch: ProductionBatch, has_report: bool, is_active: bool = 
         "batch_no": batch_no or str(batch.id),
         "date": dt(batch.date),
         "product_name": batch.product_name,
-        "recipe_id": batch.recipe_id,
+        "recipe_type": batch.recipe_type,
         "batch_size": batch.batch_size,
         "mop": batch.mop,
         "water": batch.water,
@@ -250,15 +287,20 @@ def serialize_batch(batch: ProductionBatch, has_report: bool, is_active: bool = 
     }
 
 
+# Serialize a batch material row.
+
 def serialize_batch_material(material: ProductionBatchMaterial) -> dict:
     return {
         "id": material.id,
         "batch_id": material.batch_id,
         "rm_name": material.rm_name,
         "quantity": material.quantity,
+        "total_quantity": material.total_quantity,
         "created_at": dt(material.created_at),
     }
 
+
+# Serialize a production report when one exists.
 
 def serialize_report(report: ProductionReport | None) -> dict | None:
     if not report:

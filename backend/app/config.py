@@ -4,6 +4,8 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
+# Define Settings.
+
 class Settings(BaseSettings):
     app_name: str = "Poultry ERP API"
     debug: bool = False
@@ -13,6 +15,8 @@ class Settings(BaseSettings):
     # Default local PostgreSQL database named `poultry`.
     # Override via DATABASE_URL in backend/app/.env if needed.
     database_url: str = "postgresql+psycopg://postgres@localhost:5432/poultry"
+
+    # Parse debug flag.
 
     @field_validator("debug", mode="before")
     @classmethod
@@ -27,9 +31,13 @@ class Settings(BaseSettings):
                 return False
         return value
 
+    # Define Config.
+
     class Config:
         env_file = ".env"
 
+
+# Get settings.
 
 @lru_cache
 def get_settings() -> Settings:

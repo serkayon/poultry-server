@@ -6,6 +6,8 @@ from .database import init_db
 from .services.plc_simulator import start_plc_background_writer
 
 
+# Create app.
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Poultry ERP API")
     app.router.redirect_slashes = False

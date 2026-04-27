@@ -1,3 +1,4 @@
+// Centralized API client, auth session helpers, and endpoint wrappers.
 import axios from 'axios'
 
 const configuredApiUrl = String(import.meta.env.VITE_API_URL || '')
@@ -15,10 +16,12 @@ const client = axios.create({
   baseURL: apiBaseUrl,
   headers: { 'Content-Type': 'application/json' },
 })
+// Encode a dynamic URL segment safely.
 const encodePathParam = (value) => encodeURIComponent(String(value ?? ''))
 const AUTH_TOKEN_STORAGE_KEY = 'poultry_auth_token'
 const AUTH_USER_STORAGE_KEY = 'poultry_auth_user'
 
+// Read a value from localStorage in browser-safe form.
 const getStoredValue = (key) => {
   if (typeof window === 'undefined') return ''
   return String(window.localStorage.getItem(key) || '')
@@ -60,6 +63,7 @@ export const clearAuthSession = () => {
 let backendReachable = true
 const backendStatusListeners = new Set()
 
+// Notify all backend reachability subscribers.
 const notifyBackendStatus = () => {
   backendStatusListeners.forEach((listener) => {
     try {
@@ -70,12 +74,14 @@ const notifyBackendStatus = () => {
   })
 }
 
+// Update the cached backend reachability state.
 const setBackendReachable = (isReachable) => {
   if (backendReachable === isReachable) return
   backendReachable = isReachable
   notifyBackendStatus()
 }
 
+// Extract a normalized text payload from an HTTP error.
 const collectErrorText = (error) => {
   const parts = []
   const message = String(error?.message || '').trim()
@@ -93,6 +99,7 @@ const collectErrorText = (error) => {
   return parts.join(' ').toLowerCase()
 }
 
+// Classify errors that indicate the backend is unreachable.
 const isBackendOfflineError = (error) => {
   if (!error?.response) return true
 
@@ -140,7 +147,9 @@ client.interceptors.request.use((config) => {
 export default client
 
 export const backendStatus = {
+  // Inspect the cached health state.
   get: () => backendReachable,
+  // Subscribe to health-state changes.
   subscribe: (listener) => {
     if (typeof listener !== 'function') return () => {}
     backendStatusListeners.add(listener)
@@ -149,6 +158,7 @@ export const backendStatus = {
       backendStatusListeners.delete(listener)
     }
   },
+  // Ping the backend health endpoint.
   ping: async () => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 4000)
@@ -171,6 +181,7 @@ export const backendStatus = {
 }
 
 export const auth = {
+  // Authentication and PIN endpoints.
   login: (email, password) => client.post('/auth/login', { email, password }),
   vendorSignup: (data) => client.post('/auth/vendor-signup', data),
   vendorCreateCustomer: (data) => client.post('/auth/vendor/customer-signup', data),
@@ -183,6 +194,7 @@ export const auth = {
 
 
 export const plc = {
+  // PLC monitoring endpoints.
   latest: () => client.get('/plc/latest'),
   history: (minutes = 60, params = {}) => client.get('/plc/history', { params: { minutes, ...params } }),
   machineStatus: () => client.get('/plc/machine/status'),
@@ -191,6 +203,7 @@ export const plc = {
 
 
 export const rawMaterial = {
+  // Raw material endpoints.
   listTypes: () => client.get('/raw-material/types'),
   addType: (name) => client.post('/raw-material/types', null, { params: { name } }),
   updateType: (id, name) => client.put(`/raw-material/types/${id}`, null, { params: { name } }),
@@ -207,9 +220,9 @@ export const rawMaterial = {
       { params }
     ),
   create: (data) => client.post('/raw-material', data),
-  update: (id, data) => client.put(`/raw-material/${id}`, data),
-  downloadEntry: (id, format = 'pdf') => client.get(`/raw-material/${id}/download`, { params: { format }, responseType: 'blob' }),
-  getLabReport: (entryId) => client.get(`/raw-material/lab-report/${entryId}`),
+  update: (entryCode, data) => client.put(`/raw-material/${encodePathParam(entryCode)}`, data),
+  downloadEntry: (entryCode, format = 'pdf') => client.get(`/raw-material/${encodePathParam(entryCode)}/download`, { params: { format }, responseType: 'blob' }),
+  getLabReport: (entryCode) => client.get(`/raw-material/lab-report/${encodePathParam(entryCode)}`),
   submitLabReport: (data) => client.post('/raw-material/lab-report', data),
   download: (format, params = {}) =>
     client.get('/raw-material/download', {
@@ -219,6 +232,7 @@ export const rawMaterial = {
 }
 
 export const dispatchApi = {
+  // Dispatch entry endpoints.
   list: (params) => client.get('/dispatch', { params }),
   listByPeriod: (period, productType = 'all', params = {}) =>
     client.get(
@@ -231,17 +245,18 @@ export const dispatchApi = {
       { params }
     ),
   create: (data) => client.post('/dispatch', data),
-  update: (id, data) => client.put(`/dispatch/${id}`, data),
-  downloadEntry: (id, format = 'pdf') => client.get(`/dispatch/${id}/download`, { params: { format }, responseType: 'blob' }),
+  update: (dispatchCode, data) => client.put(`/dispatch/${encodePathParam(dispatchCode)}`, data),
+  downloadEntry: (dispatchCode, format = 'pdf') => client.get(`/dispatch/${encodePathParam(dispatchCode)}/download`, { params: { format }, responseType: 'blob' }),
   download: (format, params = {}) =>
     client.get('/dispatch/download', {
       params: { format, ...params },
       responseType: 'blob',
     }),
-  downloadInvoice: (id) => client.get(`/dispatch/${id}/invoice`, { responseType: 'blob' }),
+  downloadInvoice: (dispatchCode) => client.get(`/dispatch/${encodePathParam(dispatchCode)}/invoice`, { responseType: 'blob' }),
 }
 
 export const productionApi = {
+  // Production batch endpoints.
   listBatches: (params) => client.get('/production/batches', { params }),
   listBatchesByPeriod: (period, productName = 'all', params = {}) =>
     client.get(
@@ -280,30 +295,7 @@ export const productionApi = {
     }),
 }
 
-// export const stockApi = {
-//   rm: (params) => client.get('/stock/rm', { params }),
-//   feed: (params) => client.get('/stock/feed', { params }),
-//   feedSummary: () => client.get('/stock/feed/summary'),
-//   downloadRm: (format) => client.get('/stock/download/rm', { params: { format }, responseType: 'blob' }),
-//   downloadFeed: (format) => client.get('/stock/download/feed', { params: { format }, responseType: 'blob' }),
-//    downloadDispatch: (format = "pdf") =>
-//     client.get('/stock/dispatch/report', {
-//       params: { format },
-//       responseType: 'blob'
-//     }),
 
-//   downloadProduction: (format = "pdf") =>
-//     client.get('/stock/production/report', {
-//       params: { format },
-//       responseType: 'blob'
-//     }),
-
-//   downloadFeed: (format = "pdf") =>
-//     client.get('/stock/download/feed', {
-//       params: { format },
-//       responseType: 'blob'
-//     }),
-// }
  export const stockApi = {
   rm: (params) => client.get('/stock/rm', { params }),
   rmByPeriod: (period, params = {}) =>
@@ -322,11 +314,6 @@ export const productionApi = {
     }),
   downloadRMIndividual: (format = "pdf") =>
     client.get('/stock/download/rm-summary', {
-      params: { format },
-      responseType: 'blob'
-    }),
-  downloadFeedIndividual: (format = "pdf") =>
-    client.get('/stock/download/feed-summary', {
       params: { format },
       responseType: 'blob'
     }),
@@ -352,6 +339,12 @@ export const productionApi = {
       responseType: 'blob'
     }),
 
+  downloadFeedIndividual: (format = "pdf") =>
+    client.get('/stock/download/feed-summary', {
+      params: { format },
+      responseType: 'blob'
+    }),
+    
   // ✅ Overall Stock (RM + Feed in single file)
   downloadOverall: (format = "pdf") =>
     client.get('/stock/download/overall', {

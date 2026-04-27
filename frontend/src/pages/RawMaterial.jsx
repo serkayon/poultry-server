@@ -23,6 +23,7 @@ import {
   todayDateInputIST,
 } from "../utils/datetime";
 
+// Raw material entry, lab report, and stock management page.
 const IST_TIME_ZONE = "Asia/Kolkata"
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/
 const DEFAULT_TIME_PARTS = { hour: "12", minute: "00", meridiem: "AM" }
@@ -61,6 +62,14 @@ function currentTimePartsIST() {
   return getTimePartsIST(new Date())
 }
 
+function normalizeQualityGrade(value) {
+  const text = String(value || "").trim().toLowerCase()
+  if (!text) return ""
+  if (["good", "g", "1", "yes", "y", "true"].includes(text)) return "Good"
+  if (["bad", "b", "0", "no", "n", "false"].includes(text)) return "Bad"
+  return String(value || "").trim().charAt(0).toUpperCase() + String(value || "").trim().slice(1).toLowerCase()
+}
+
 function toApiDateTimeFrom12HourInput(dateInput, hourInput, minuteInput, meridiemInput) {
   if (!DATE_ONLY_RE.test(String(dateInput || ""))) return null
 
@@ -94,7 +103,7 @@ const emptyEntryForm = () => {
 }
 
 const emptyLabForm = () => ({
-  entry_id: null,
+  entry_code: "",
   protein: '',
   fat: '',
   fiber: '',
@@ -112,6 +121,11 @@ const emptyLabForm = () => ({
   maize_count: '',
   colour: '',
   smell: '',
+})
+
+const emptyLabMeta = () => ({
+  created_at: null,
+  last_modified_at: null,
 })
 
 export default function RawMaterial() {
@@ -134,6 +148,7 @@ export default function RawMaterial() {
   const [selectedEntry, setSelectedEntry] = useState(null)
   const [editingEntry, setEditingEntry] = useState(null)
   const [popupMessage, setPopupMessage] = useState('')
+  const [labMeta, setLabMeta] = useState(emptyLabMeta())
   const { requestPin, pinDialog } = usePinGate()
 
 	  //Table
@@ -145,7 +160,7 @@ const [dateRangePreset, setDateRangePreset] = useState("today")
 const [fromDate, setFromDate] = useState("")
 const [toDate, setToDate] = useState("")
 const rowsPerPage = 5;
-
+// const rowsPerPage = 2;
 const todayDate = todayDateInputIST()
 const resolvedRange = (() => {
   if (dateRangePreset === "custom") {
@@ -168,6 +183,13 @@ const resolvedRange = (() => {
 const effectiveFromDate = resolvedRange.from
 const effectiveToDate = resolvedRange.to
 
+useEffect(() => {
+  if (dateRangePreset === "custom" && !fromDate && !toDate) {
+    const today = todayDateInputIST()
+    setFromDate(today)
+    setToDate(today)
+  }
+}, [dateRangePreset])
 
 
 const downloadPDF = () => {
@@ -211,6 +233,7 @@ const downloadExcel = () => {
 const filteredEntries = entries.filter(e => {
   return (
     (
+      String(e.entry_code || '').toLowerCase().includes(search.toLowerCase()) ||
       e.rm_type.toLowerCase().includes(search.toLowerCase()) ||
       e.supplier.toLowerCase().includes(search.toLowerCase()) ||
       e.vehicle_no.toLowerCase().includes(search.toLowerCase())
@@ -253,7 +276,7 @@ useEffect(() => {
           const bDate = parseApiDate(b.date)?.getTime() ?? Number.NEGATIVE_INFINITY
           const aDate = parseApiDate(a.date)?.getTime() ?? Number.NEGATIVE_INFINITY
           if (bDate !== aDate) return bDate - aDate
-          return (Number(b.id) || 0) - (Number(a.id) || 0)
+          return String(b.entry_code || '').localeCompare(String(a.entry_code || ''))
         })
         setEntries(sorted)
       })
@@ -402,7 +425,7 @@ useEffect(() => {
     }
 
     try {
-      await rawMaterial.update(editingEntry.id, {
+      await rawMaterial.update(editingEntry.entry_code, {
         date: entryDateTime,
         rm_type: editForm.rm_type,
         supplier: editForm.supplier,
@@ -424,11 +447,15 @@ useEffect(() => {
   const openLab = async (entry) => {
     setSelectedEntry(entry)
     try {
-      const { data } = await rawMaterial.getLabReport(entry.id)
+      const { data } = await rawMaterial.getLabReport(entry.entry_code)
       const report = data?.report || {}
+      setLabMeta({
+        created_at: report.created_at ?? null,
+        last_modified_at: report.last_modified_at ?? null,
+      })
       setLabForm({
         ...emptyLabForm(),
-        entry_id: entry.id,
+        entry_code: entry.entry_code,
         protein: report.protein ?? '',
         fat: report.fat ?? '',
         fiber: report.fiber ?? '',
@@ -444,13 +471,14 @@ useEffect(() => {
         dunkey: report.dunkey ?? '',
         fm: report.fm ?? '',
         maize_count: report.maize_count ?? '',
-        colour: report.colour ?? '',
-        smell: report.smell ?? '',
+        colour: normalizeQualityGrade(report.colour),
+        smell: normalizeQualityGrade(report.smell),
       })
     } catch {
+      setLabMeta(emptyLabMeta())
       setLabForm({
         ...emptyLabForm(),
-        entry_id: entry.id,
+        entry_code: entry.entry_code,
       })
     }
     setShowLab(true)
@@ -462,12 +490,15 @@ const formatMt = (valueKg) => {
   const handleLabSubmit = async (e) => {
     e.preventDefault()
     setLabError('')
-    const payload = { ...labForm, entry_id: selectedEntry.id }
+    const payload = { ...labForm, entry_code: selectedEntry.entry_code }
     LAB_PARAMS.forEach((k) => { if (payload[k] !== '') payload[k] = parseFloat(payload[k]) || null })
+    payload.colour = normalizeQualityGrade(payload.colour)
+    payload.smell = normalizeQualityGrade(payload.smell)
     try {
       await rawMaterial.submitLabReport(payload)
       setShowLab(false)
       setSelectedEntry(null)
+      setLabMeta(emptyLabMeta())
       setLabError('')
       load()
     } catch (err) {
@@ -503,13 +534,13 @@ const formatMt = (valueKg) => {
     })
   }
 
-  const downloadEntryReport = (entryId, format) => {
-    rawMaterial.downloadEntry(entryId, format).then(({ data }) => {
+  const downloadEntryReport = (entryCode, format) => {
+    rawMaterial.downloadEntry(entryCode, format).then(({ data }) => {
       const ext = format === 'pdf' ? 'pdf' : 'xlsx'
       const url = URL.createObjectURL(new Blob([data]))
       const a = document.createElement('a')
       a.href = url
-      a.download = `raw_material_entry_${entryId}_report.${ext}`
+      a.download = `raw_material_entry_${entryCode}_report.${ext}`
       a.click()
       URL.revokeObjectURL(url)
     }).catch((err) => {
@@ -517,9 +548,12 @@ const formatMt = (valueKg) => {
       setPopupMessage(detail)
     })
   }
-
+const resetAddForm = () => {
+  setForm(emptyEntryForm())
+  setAddError('')
+}
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-2 md:pb-28 lg:pb-0">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
 
   {/* Total Stock */}
@@ -611,8 +645,10 @@ const formatMt = (valueKg) => {
 	    gap-2
 	  ">
 	    <button
-	      onClick={() => setShowAdd(true)}
-	      className="px-4 py-2 rounded-lg bg-[#245658] text-primary font-medium whitespace-nowrap"
+onClick={() => {
+  resetAddForm()   
+  setShowAdd(true)
+}}	      className="px-4 py-2 rounded-lg bg-[#245658] text-primary font-medium whitespace-nowrap"
 	    >
 	      + Add RM Entry
 	    </button>
@@ -639,12 +675,12 @@ const formatMt = (valueKg) => {
 	    </button>
 	  </div>
 </div>
-      <Modal open={showAddType} onClose={() => { setShowAddType(false); setNewRmType('') }} title="Add RM Type">
+      <Modal open={showAddType} onClose={() => { setShowAddType(false); setNewRmType('') ;resetAddForm() }} title="Add RM Type">
         <p className="text-gray-900 text-sm mb-3">New RM name will be added to Raw Material report and RM stock.</p>
         <input type="text" value={newRmType} onChange={(e) => setNewRmType(e.target.value)} placeholder="e.g. MAIZE, SOYA" className="w-full px-3 py-2 rounded-lg bg-primary-light border border-gray-600 text-gray-900 mb-4" />
         <div className="flex gap-2">
           <button onClick={async () => { await rawMaterial.addType(newRmType); setShowAddType(false); setNewRmType(''); loadMeta() }} className="px-4 py-2 rounded-lg bg-accent-green text-primary font-medium" disabled={!newRmType.trim()}>Add</button>
-          <button onClick={() => { setShowAddType(false); setNewRmType('') }} className="px-4 py-2 rounded-lg border border-gray-600 text-gray-900">Cancel</button>
+          <button onClick={() => { setShowAddType(false); setNewRmType(''); resetAddForm() }} className="px-4 py-2 rounded-lg border border-gray-600 text-gray-900">Cancel</button>
         </div>
       </Modal>
 
@@ -655,7 +691,7 @@ const formatMt = (valueKg) => {
   <div className="p-4 border-b border-gray-200 flex flex-wrap items-end gap-4">
 
     {/* Search */}
-    <div className="w-full md:w-64">
+    <div className="w-full md:w-64 ">
       <label className="block text-xs text-gray-500 mb-1">Search</label>
       <div className="relative">
         <img
@@ -679,12 +715,16 @@ const formatMt = (valueKg) => {
       <select
         value={rmTypeFilter}
         onChange={(e) => setRmTypeFilter(e.target.value)}
-        className="border border-gray-400 rounded-lg px-3 py-2 text-sm min-w-[150px]"
+      className="w-full max-w-[300px] truncate whitespace-nowrap overflow-hidden text-ellipsis px-3 py-2 rounded-lg border border-gray-400 text-gray-800 text-sm bg-white min-w-[150px]"
       >
         <option value="">All</option>
-        {[...new Set(entries.map(e => e.rm_type))].map(type => (
-          <option key={type} value={type}>{type}</option>
-        ))}
+        {[...new Set(entries.map(e => e.rm_type))].map(type => {
+               const shortText = type.length > 25 ? type.slice(0, 25) + "..." : type;          return (
+            <option key={type} value={type}>
+              {shortText}
+            </option>
+          )
+        })}
       </select>
     </div>
 
@@ -735,6 +775,7 @@ const formatMt = (valueKg) => {
 <table className="min-w-full text-sm border border-gray-300">      
      <thead className="bg-[#245658] text-white border-b border-gray-300">
         <tr>
+          <th className="px-4 py-3 text-left border border-gray-300">Entry Code</th>
           <th className="px-4 py-3 text-left border border-gray-300">Entry Date & Time</th>
           <th className="px-4 py-3 text-left border border-gray-300">RM Type</th>
           <th className="px-4 py-3 text-left border border-gray-300">Supplier</th>
@@ -750,9 +791,10 @@ const formatMt = (valueKg) => {
 
       <tbody>
         {paginatedEntries.map((e) => (
-          <tr key={e.id} className=" hover:bg-gray-50">
+          <tr key={e.entry_code} >
+            <td className="px-4 py-3 border border-gray-300 font-medium">{e.entry_code}</td>
             <td className="px-4 py-3 border border-gray-300">{formatDateTimeIST(e.date)}</td>
-            <td className="px-4 py-3 border border-gray-300">{e.rm_type}</td>
+            <td className="px-4 py-3 border border-gray-300 break-all">{e.rm_type}</td>
             <td className="px-4 py-3 border border-gray-300">{e.supplier}</td>
             <td className="px-4 py-3 border border-gray-300">{e.challan_no}</td>
             <td className="px-4 py-3 border border-gray-300">{e.vehicle_no}</td>
@@ -796,20 +838,20 @@ const formatMt = (valueKg) => {
 	            <td className="px-4 py-3 border border-gray-300">
 	              <div className="flex items-center gap-3">
 	                <button
-	                  onClick={() => downloadEntryReport(e.id, 'pdf')}
+	                  onClick={() => downloadEntryReport(e.entry_code, 'pdf')}
 	                  className="px-2 py-1 text-xs border rounded  bg-red-600 text-white font-semibold hover:bg-red-500 text-nowrap"
 	                >
 	                  PDF
 	                </button>
 	                <button
-	                  onClick={() => downloadEntryReport(e.id, 'xlsx')}
+	                  onClick={() => downloadEntryReport(e.entry_code, 'xlsx')}
 	                  className="px-2 py-1 text-xs border rounded  bg-green-600 text-white font-semibold hover:bg-green-700 text-nowrap"
 	                >
 	                  Excel
 	                </button>
 	              </div>
 	            </td>
-            <td className="px-4 py-3 border border-gray-300">{e.remarks || '-'}</td>
+            <td className="px-4 py-3 border border-gray-300  break-all">{e.remarks || '-'}</td>
           </tr>
         ))}
       </tbody>
@@ -821,7 +863,7 @@ const formatMt = (valueKg) => {
   <div className="flex items-center justify-between px-4 py-3 bg-gray-50">
 
     <span className="text-sm text-gray-600">
-      Page {currentPage} of {totalPages}
+      Page {currentPage} of {totalPages || 1}
     </span>
 
     <div className="flex gap-1">
@@ -833,18 +875,31 @@ const formatMt = (valueKg) => {
         ◀
       </button>
 
-      {[...Array(totalPages)].map((_,i)=>(
-        <button
-          key={i}
-          onClick={()=>setCurrentPage(i+1)}
-          className={`px-3 py-1 border rounded ${
-            currentPage === i+1 ? 'bg-green-700 text-white' : ''
-          }`}
-        >
-          {i+1}
-        </button>
-      ))}
+ {(() => {
+  let pages = [];
 
+  if (totalPages <= 3) {
+    pages = Array.from({ length: totalPages }, (_, i) => i + 1);
+  } else if (currentPage <= 2) {
+    pages = [1, 2, 3];
+  } else if (currentPage >= totalPages - 1) {
+    pages = [totalPages - 2, totalPages - 1, totalPages];
+  } else {
+    pages = [currentPage - 1, currentPage, currentPage + 1];
+  }
+
+  return pages.map((p) => (
+    <button
+      key={p}
+      onClick={() => setCurrentPage(p)}
+      className={`px-3 py-1 border rounded ${
+        currentPage === p ? "bg-green-700 text-white" : ""
+      }`}
+    >
+      {p}
+    </button>
+  ));
+})()}
       <button
         disabled={currentPage === totalPages}
         onClick={()=>setCurrentPage(p => p + 1)}
@@ -887,16 +942,18 @@ const formatMt = (valueKg) => {
 
   </div>
 </div>
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto max-h-[500px] overflow-y-auto ">
           <table className="min-w-full text-sm border border-gray-300">
-            <thead className="bg-[#245658] text-white">
+            <thead className="bg-[#245658] text-white sticky top-0 z-10">
               <tr>
                 <th className="px-4 py-3 text-left border border-gray-300">RM Type</th>
                 <th className="px-4 py-3 text-left border border-gray-300">Current Stock in (kg)</th>
                    <th className="px-4 py-3 text-left border border-gray-300">Current Stock in  (MT)</th>
               </tr>
             </thead>
-            <tbody>
+                 
+            <tbody >
+       
               {individualStock.length === 0 ? (
                 <tr>
                   <td colSpan={2} className="px-4 py-3 text-gray-500 border border-gray-300">
@@ -905,19 +962,24 @@ const formatMt = (valueKg) => {
                 </tr>
               ) : (
                 individualStock.map((row) => (
-                  <tr key={row.rm_name} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 border border-gray-300">{row.rm_name}</td>
+                  <tr key={row.rm_name}>
+                    <td className="px-4 py-3 border border-gray-300 break-all">{row.rm_name}</td>
                     <td className="px-4 py-3 border border-gray-300 font-medium">{Number(row.closing_stock || 0).toFixed(2)}</td>
                     <td className="px-4 py-3 border border-gray-300 font-medium">{formatMt(row.closing_stock)}</td>
                   </tr>
                 ))
               )}
+             
             </tbody>
+      
           </table>
         </div>
       </div>
 
-      <Modal open={showAdd} onClose={() => { setShowAdd(false); setAddError(''); }} title="Add RM Inward" >
+      <Modal open={showAdd} onClose={() => { 
+  setShowAdd(false)
+  resetAddForm()
+}} title="Add RM Inward" >
         <form onSubmit={handleAdd} className="space-y-4">
           <div className="bg-gray-100 border border-gray-300 rounded-lg p-3">
             <p className="text-sm font-semibold text-gray-700 mb-2">Available Raw Materials</p>
@@ -935,7 +997,7 @@ const formatMt = (valueKg) => {
                   <tbody>
                     {availableRawMaterials.map((row) => (
                       <tr key={`available-rm-${row.rm_name}`} className="bg-gray-50 text-gray-700 border-b border-gray-200 last:border-b-0">
-                        <td className="px-3 py-2">{row.rm_name}</td>
+                        <td className="px-3 py-2 break-all">{row.rm_name}</td>
                         <td className="px-3 py-2 text-right font-medium">{row.closing_stock.toFixed(2)}</td>
                       </tr>
                     ))}
@@ -949,7 +1011,7 @@ const formatMt = (valueKg) => {
               {addError}
             </div>
           )}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_1.5fr_1.5fr] gap-4">
             <div>
               <label className="block text-sm text-gray-900 mb-1">Date</label>
               <input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} className="w-full px-3 py-2 rounded-lg bg-primary-light border border-gray-600 text-black" required />
@@ -995,9 +1057,14 @@ const formatMt = (valueKg) => {
                 <div className="relative">
               <select value={form.rm_type} onChange={(e) => setForm((f) => ({ ...f, rm_type: e.target.value }))} className="w-full px-3  py-2  rounded-lg bg-primary-light border border-gray-600 text-black appearance-none" required>
                 <option value="">Select</option>
-                {rmTypes.map((t) => (
-                  <option key={t.id} value={t.name}>{t.name}</option>
-                ))}
+                {rmTypes.map((t) => {
+                  const shortText = t.name.length > 15 ? `${t.name.substring(0, 15)}...` : t.name
+                  return (
+                    <option key={t.id} value={t.name}>
+                      {shortText}
+                    </option>
+                  )
+                })}
               </select>
                 <img
       src={arrow}
@@ -1032,7 +1099,10 @@ const formatMt = (valueKg) => {
           </div>
           <div className="flex gap-2">
             <button type="submit" className="px-4 py-2 rounded-lg bg-accent-green text-primary font-medium">Submit</button>
-            <button type="button" onClick={() => setShowAdd(false)} className="px-4 py-2 rounded-lg border border-gray-600 text-black">Cancel</button>
+            <button type="button"   onClick={() => {
+    setShowAdd(false)
+    resetAddForm()
+  }} className="px-4 py-2 rounded-lg border border-gray-600 text-black">Cancel</button>
           </div>
         </form>
       </Modal>
@@ -1055,7 +1125,7 @@ const formatMt = (valueKg) => {
                   <tbody>
                     {availableRawMaterials.map((row) => (
                       <tr key={`available-rm-edit-${row.rm_name}`} className="bg-gray-50 text-gray-700 border-b border-gray-200 last:border-b-0">
-                        <td className="px-3 py-2">{row.rm_name}</td>
+                        <td className="px-3 py-2 break-all">{row.rm_name}</td>
                         <td className="px-3 py-2 text-right font-medium">{row.closing_stock.toFixed(2)}</td>
                       </tr>
                     ))}
@@ -1071,11 +1141,11 @@ const formatMt = (valueKg) => {
           )}
           {editingEntry && (
             <p className="text-xs text-gray-600">
-              Entry Date: {formatDateTimeIST(editingEntry.date)} | Last Modified: {formatDateTimeIST(editingEntry.last_modified_at || editingEntry.created_at)}
+              Entry Date: {formatDateTimeIST(editingEntry.date)} | Last Modified: {formatDateTimeIST(editingEntry.last_modified_at)}
             </p>
           )}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
+<div className="grid grid-cols-1 md:grid-cols-[1fr_1.5fr_1.5fr] gap-4">
+              <div>
               <label className="block text-sm text-gray-900 mb-1">Date</label>
               <input type="date" value={editForm.date} onChange={(e) => setEditForm((f) => ({ ...f, date: e.target.value }))} className="w-full px-3 py-2 rounded-lg bg-primary-light border border-gray-600 text-black" required />
             </div>
@@ -1120,9 +1190,14 @@ const formatMt = (valueKg) => {
               <div className="relative">
                 <select value={editForm.rm_type} onChange={(e) => setEditForm((f) => ({ ...f, rm_type: e.target.value }))} className="w-full px-3 py-2 rounded-lg bg-primary-light border border-gray-600 text-black appearance-none" required>
                   <option value="">Select</option>
-                  {rmTypes.map((t) => (
-                    <option key={t.id} value={t.name}>{t.name}</option>
-                  ))}
+                  {rmTypes.map((t) => {
+                    const shortText = t.name.length > 25 ? `${t.name.substring(0, 25)}...` : t.name
+                    return (
+                      <option key={t.id} value={t.name}>
+                        {shortText}
+                      </option>
+                    )
+                  })}
                 </select>
                 <img
                   src={arrow}
@@ -1166,7 +1241,7 @@ const formatMt = (valueKg) => {
         </form>
       </Modal>
 
-      <Modal open={showLab} onClose={() => { setShowLab(false); setSelectedEntry(null); setLabError(''); }} title="Lab Report" >
+      <Modal open={showLab} onClose={() => { setShowLab(false); setSelectedEntry(null); setLabMeta(emptyLabMeta()); setLabError(''); }} title="Lab Report" >
         {selectedEntry && (
           <>
             {labError && (
@@ -1178,13 +1253,13 @@ const formatMt = (valueKg) => {
               Date: {formatDateTimeIST(selectedEntry.date)} | RM Type: {selectedEntry.rm_type} | Supplier: {selectedEntry.supplier} | Challan: {selectedEntry.challan_no} | Vehicle: {selectedEntry.vehicle_no} | Weight: {selectedEntry.total_weight} | Remarks: {selectedEntry.remarks || '-'}
             </p>
             <p className="text-xs text-gray-600 mb-4">
-              Entry Date: {formatDateTimeIST(selectedEntry.date)} | Last Modified: {formatDateTimeIST(selectedEntry.last_modified_at || selectedEntry.created_at)}
+              Lab Report Created At: {formatDateTimeIST(labMeta.created_at)} | Last Modified: {formatDateTimeIST(labMeta.last_modified_at)}
             </p>
             <form onSubmit={handleLabSubmit} className="space-y-4    md:pb-4 overflow-y-auto">
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 {LAB_PARAMS.map((key) => (
                   <div key={key}>
-                    <label className="block text-xs text-black capitalize mb-0.5">{key}</label>
+                    <label className="block text-xs text-black capitalize mb-0.5">{key} %</label>
                     <input type="number" step="any" value={labForm[key] || ''} onChange={(e) => setLabForm((f) => ({ ...f, [key]: e.target.value }))} className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm" />
                   </div>
                 ))}
@@ -1193,10 +1268,22 @@ const formatMt = (valueKg) => {
                 <div className="pt-2 border-t border-gray-700">
                   <p className="text-xs text-black mb-2">For Maize</p>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                    {MAIZE_EXTRA.map((key) => (
-                      <div key={key}>
-                        <label className="block text-xs text-black capitalize mb-0.5">{key.replace('_', ' ')}</label>
-                        <input type="text" value={labForm[key] || ''} onChange={(e) => setLabForm((f) => ({ ...f, [key]: e.target.value }))} className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm" />
+                  {MAIZE_EXTRA.map((key) => (
+                    <div key={key}>
+                        <label className="block text-xs text-black capitalize mb-0.5">{key.replace('_', ' ')}   {key !== "small" && key !== "colour" && key !== "smell" ? " %" : ""}</label>
+                        {key === "colour" || key === "smell" ? (
+                          <select
+                            value={labForm[key] || ''}
+                            onChange={(e) => setLabForm((f) => ({ ...f, [key]: e.target.value }))}
+                            className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm"
+                          >
+                            <option value="">Select</option>
+                            <option value="Good">Good</option>
+                            <option value="Bad">Bad</option>
+                          </select>
+                        ) : (
+                          <input type="text" value={labForm[key] || ''} onChange={(e) => setLabForm((f) => ({ ...f, [key]: e.target.value }))} className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm" />
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1204,10 +1291,7 @@ const formatMt = (valueKg) => {
               )}
               <div className="flex gap-2 pt-4 ">
                 <button type="submit" className="px-4 py-2 rounded-lg bg-accent-green text-primary font-medium">Submit</button>
-                <button type="button" onClick={() => { setShowLab(false); setSelectedEntry(null) }} className="px-4 py-2 rounded-lg border border-gray-600 text-gray-900">Cancel</button>
-              </div>
-              <div className="text-right text-xs text-gray-600">
-                Created At: {formatDateTimeIST(selectedEntry.created_at)}
+                <button type="button" onClick={() => { setShowLab(false); setSelectedEntry(null); setLabMeta(emptyLabMeta()); setLabError('') }} className="px-4 py-2 rounded-lg border border-gray-600 text-gray-900">Cancel</button>
               </div>
             </form>
           </>

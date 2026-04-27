@@ -3,6 +3,8 @@ from typing import Optional
 from datetime import datetime
 
 
+# Schema model for `ProductionBatchCreate` request/response payloads.
+
 class ProductionBatchCreate(BaseModel):
     batch_no: Optional[str] = None
     date: datetime
@@ -15,6 +17,8 @@ class ProductionBatchCreate(BaseModel):
     output: float
     recipe_id: Optional[int] = None
 
+
+# Schema model for `ProductionReportCreate` request/response payloads.
 
 class ProductionReportCreate(BaseModel):
     batch_id: int
@@ -44,11 +48,14 @@ class ProductionReportCreate(BaseModel):
     fines: Optional[float] = None
 
 
+# Schema model for `ProductionBatchResponse` request/response payloads.
+
 class ProductionBatchResponse(BaseModel):
     id: int
     batch_no: str
     date: datetime
     product_name: str
+    recipe_type: Optional[str] = None
     batch_size: float
     mop: Optional[float] = None
     water: Optional[float] = None
@@ -59,9 +66,13 @@ class ProductionBatchResponse(BaseModel):
     created_at: datetime
     last_modified_at: Optional[datetime] = None
 
+    # Enable ORM-to-schema attribute mapping for response models.
+
     class Config:
         from_attributes = True
 
+
+# Schema model for `ProductionReportResponse` request/response payloads.
 
 class ProductionReportResponse(BaseModel):
     id: int
@@ -78,6 +89,8 @@ class ProductionReportResponse(BaseModel):
     pellet_diameter: Optional[float] = None
     fines: Optional[float] = None
     created_at: datetime
+
+    # Enable ORM-to-schema attribute mapping for response models.
 
     class Config:
         from_attributes = True

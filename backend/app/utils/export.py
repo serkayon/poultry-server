@@ -1,41 +1,45 @@
 import io
+import random
 from datetime import datetime, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from collections import OrderedDict
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
 from reportlab.lib import colors
 from reportlab.lib.colors import HexColor
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import HRFlowable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, KeepTogether
+from reportlab.platypus import (
+    Image,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+    KeepTogether,
+    HRFlowable,
+)
 
 from .chart_generator import generate_plc_graph_images
 
-
-PDF_HEADER_BG = HexColor("#2E5E9E")
-PDF_GRID = HexColor("#B0B7C3")
-LETTERHEAD_PRIMARY = HexColor("#123B67")
-LETTERHEAD_SECONDARY = HexColor("#EAF1FB")
-LETTERHEAD_TEXT_DARK = HexColor("#17324F")
-PDF_PAGE_SIZE = A4
-PDF_LEFT_RIGHT_MARGIN = 30
-PDF_TOP_MARGIN = 96
-PDF_BOTTOM_MARGIN = 36
 try:
     IST_TIMEZONE = ZoneInfo("Asia/Kolkata")
 except ZoneInfoNotFoundError:
     IST_TIMEZONE = timezone(timedelta(hours=5, minutes=30), name="IST")
 
-
-def _safe_cell(value) -> str:
-    if value is None:
-        return ""
-    return escape(str(value)).replace("\n", "<br/>")
-
+# Normalize rows.
 
 def _normalize_rows(rows: list) -> list[list]:
     normalized: list[list] = []
@@ -46,11 +50,13 @@ def _normalize_rows(rows: list) -> list[list]:
             normalized.append([row])
     return normalized
 
+# Handle excel fill.
 
 def _excel_fill(hex_color: str) -> PatternFill:
     color = str(hex_color or "").strip().lstrip("#")
     return PatternFill(fill_type="solid", start_color=color, end_color=color)
 
+# Handle excel autofit columns.
 
 def _excel_autofit_columns(ws, min_width: int = 10, max_width: int = 48) -> None:
     for column_cells in ws.columns:
@@ -61,6 +67,7 @@ def _excel_autofit_columns(ws, min_width: int = 10, max_width: int = 48) -> None
         width = max(lengths) + 2 if lengths else min_width
         ws.column_dimensions[column_cells[0].column_letter].width = max(min_width, min(width, max_width))
 
+# Handle excel apply table style.
 
 def _excel_apply_table_style(
     ws,
@@ -95,322 +102,12 @@ def _excel_apply_table_style(
             cell.alignment = Alignment(vertical="top", wrap_text=True)
             cell.border = border
 
-
-def _column_widths(headers: list, rows: list[list], available_width: float) -> list[float]:
-    num_cols = max(len(headers), 1)
-    weights: list[float] = []
-    sample_rows = rows[:200]
-
-    for col in range(num_cols):
-        lengths: list[int] = []
-        if col < len(headers):
-            lengths.append(len(str(headers[col])))
-        for row in sample_rows:
-            if col < len(row):
-                lengths.append(len(str(row[col] if row[col] is not None else "")))
-        max_len = max(lengths) if lengths else 8
-        # Keep columns balanced in portrait mode so no single field dominates width.
-        weights.append(float(min(max(max_len, 6), 26)))
-
-    total_weight = sum(weights) or float(num_cols)
-    return [available_width * (w / total_weight) for w in weights]
-
-
-def _pdf_doc(buffer: io.BytesIO) -> SimpleDocTemplate:
-    return SimpleDocTemplate(
-        buffer,
-        pagesize=PDF_PAGE_SIZE,
-        rightMargin=PDF_LEFT_RIGHT_MARGIN,
-        leftMargin=PDF_LEFT_RIGHT_MARGIN,
-        topMargin=PDF_TOP_MARGIN,
-        bottomMargin=PDF_BOTTOM_MARGIN,
-    )
-
-
-def _table_font_sizes(num_cols: int) -> tuple[float, float]:
-    if num_cols <= 5:
-        return 9.0, 8.5
-    if num_cols <= 8:
-        return 8.5, 8.0
-    if num_cols <= 11:
-        return 8.0, 7.4
-    return 7.6, 7.0
-
-
-def _report_company_name() -> str:
-    fallback = "SERKAYON FEED MILL"
-    try:
-        from ..config import get_settings
-
-        name = (get_settings().app_name or "").strip()
-        if name.endswith(" API"):
-            name = name[:-4].strip()
-        return name or fallback
-    except Exception:
-        return fallback
-
+# Handle generated at text.
 
 def _generated_at_text() -> str:
     return datetime.now(IST_TIMEZONE).strftime("%d %b %Y %I:%M %p")
 
-
-def _format_timestamp_ist(value: datetime | None) -> str:
-    if value is None:
-        return ""
-    if value.tzinfo is None:
-        utc_value = value.replace(tzinfo=timezone.utc)
-    else:
-        utc_value = value.astimezone(timezone.utc)
-    return utc_value.astimezone(IST_TIMEZONE).strftime("%d %b %Y %I:%M:%S %p IST")
-
-
-def _page_decorator_with_palette(
-    title: str,
-    company_name: str,
-    generated_at: str,
-    *,
-    primary_color: colors.Color,
-    secondary_color: colors.Color,
-    secondary_text_color: colors.Color,
-):
-    report_title = str(title or "Report")[:120]
-
-    def _draw(canvas, doc):
-        page_width, page_height = doc.pagesize
-
-        primary_h = 42
-        secondary_h = 24
-
-        canvas.saveState()
-
-        canvas.setFillColor(primary_color)
-        canvas.rect(0, page_height - primary_h, page_width, primary_h, stroke=0, fill=1)
-
-        canvas.setFillColor(colors.white)
-        canvas.setFont("Helvetica-Bold", 13)
-        canvas.drawString(doc.leftMargin, page_height - 26, company_name)
-
-        canvas.setFont("Helvetica", 8)
-        canvas.drawRightString(
-            page_width - doc.rightMargin,
-            page_height - 16,
-            f"Generated: {generated_at}",
-        )
-
-        canvas.setFillColor(secondary_color)
-        secondary_y = page_height - primary_h - secondary_h
-        canvas.rect(0, secondary_y, page_width, secondary_h, stroke=0, fill=1)
-
-        canvas.setFillColor(secondary_text_color)
-        canvas.setFont("Helvetica-Bold", 11)
-        canvas.drawCentredString(page_width / 2.0, secondary_y + 8, report_title)
-
-        footer_y = doc.bottomMargin - 12
-        canvas.setStrokeColor(PDF_GRID)
-        canvas.setLineWidth(0.6)
-        canvas.line(doc.leftMargin, footer_y + 8, page_width - doc.rightMargin, footer_y + 8)
-
-        canvas.setFont("Helvetica", 8)
-        canvas.setFillColor(HexColor("#64748B"))
-        canvas.drawRightString(
-            page_width - doc.rightMargin,
-            footer_y,
-            f"Page {canvas.getPageNumber()}",
-        )
-
-        canvas.restoreState()
-
-    return _draw
-
-
-def _page_decorator(title: str, company_name: str, generated_at: str):
-    return _page_decorator_with_palette(
-        title,
-        company_name,
-        generated_at,
-        primary_color=LETTERHEAD_PRIMARY,
-        secondary_color=LETTERHEAD_SECONDARY,
-        secondary_text_color=LETTERHEAD_TEXT_DARK,
-    )
-
-
-def _build_data_table_with_palette(
-    headers: list,
-    rows: list[list],
-    doc_width: float,
-    styles,
-    *,
-    header_bg: colors.Color,
-    grid_color: colors.Color,
-    row_bg_1: colors.Color,
-    row_bg_2: colors.Color,
-    target_height: float | None = None,
-) -> Table:
-    num_cols = len(headers) if headers else max((len(r) for r in rows), default=1)
-    header_size, cell_size = _table_font_sizes(num_cols)
-
-    header_style = ParagraphStyle(
-        name="TableHeader",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=header_size,
-        leading=header_size + 2,
-        textColor=colors.whitesmoke,
-        alignment=TA_CENTER,
-        wordWrap="CJK",
-    )
-    cell_style = ParagraphStyle(
-        name="TableCell",
-        parent=styles["Normal"],
-        fontSize=cell_size,
-        leading=cell_size + 2.5,
-        wordWrap="CJK",
-    )
-
-    if not headers:
-        headers = [f"Column {i + 1}" for i in range(num_cols)]
-
-    table_data = [
-        [Paragraph(_safe_cell(col), header_style) for col in headers],
-        *[
-            [
-                Paragraph(_safe_cell(row[idx] if idx < len(row) else ""), cell_style)
-                for idx in range(num_cols)
-            ]
-            for row in rows
-        ],
-    ]
-
-    row_heights = None
-    if target_height and target_height > 0:
-        per_row = max(14.0, float(target_height) / max(len(table_data), 1))
-        row_heights = [per_row] * len(table_data)
-
-    table = Table(
-        table_data,
-        repeatRows=1,
-        splitByRow=1,
-        colWidths=_column_widths(headers, rows, doc_width),
-        rowHeights=row_heights,
-    )
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), header_bg),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("WORDWRAP", (0, 0), (-1, -1), "CJK"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [row_bg_1, row_bg_2]),
-                ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-                ("GRID", (0, 0), (-1, -1), 0.5, grid_color),
-                ("BOX", (0, 0), (-1, -1), 0.8, grid_color),
-            ]
-        )
-    )
-    table.hAlign = "LEFT"
-    return table
-
-
-def _build_data_table(
-    headers: list,
-    rows: list[list],
-    doc_width: float,
-    styles,
-    target_height: float | None = None,
-) -> Table:
-    return _build_data_table_with_palette(
-        headers,
-        rows,
-        doc_width,
-        styles,
-        header_bg=PDF_HEADER_BG,
-        grid_color=PDF_GRID,
-        row_bg_1=HexColor("#F5FAFC"),
-        row_bg_2=HexColor("#FFFFFF"),
-        target_height=target_height,
-    )
-
-
-def export_table_to_pdf(title: str, headers: list, rows: list) -> bytes:
-    buffer = io.BytesIO()
-    generated_at = _generated_at_text()
-    company_name = _report_company_name()
-
-    doc = _pdf_doc(buffer)
-    styles = getSampleStyleSheet()
-
-    normalized_rows = _normalize_rows(rows)
-    table = _build_data_table(headers, normalized_rows, doc.width, styles)
-
-    intro_style = ParagraphStyle(
-        name="Intro",
-        parent=styles["Normal"],
-        fontSize=8.5,
-        textColor=HexColor("#475569"),
-    )
-
-    story = [
-        Paragraph(
-            f"Prepared on {generated_at} | Total Records: {len(normalized_rows)}",
-            intro_style,
-        ),
-        Spacer(1, 7),
-        table,
-    ]
-
-    decorator = _page_decorator(title, company_name, generated_at)
-    doc.build(story, onFirstPage=decorator, onLaterPages=decorator)
-    buffer.seek(0)
-    return buffer.read()
-
-
-def export_multi_table_to_pdf(title: str, sections: list[dict]) -> bytes:
-    buffer = io.BytesIO()
-    generated_at = _generated_at_text()
-    company_name = _report_company_name()
-
-    doc = _pdf_doc(buffer)
-    styles = getSampleStyleSheet()
-    section_style = ParagraphStyle(
-        name="SectionTitle",
-        parent=styles["Heading3"],
-        textColor=HexColor("#123B67"),
-    )
-    intro_style = ParagraphStyle(
-        name="IntroMulti",
-        parent=styles["Normal"],
-        fontSize=8.5,
-        textColor=HexColor("#475569"),
-    )
-
-    story = [
-        Paragraph(f"Prepared on {generated_at}", intro_style),
-        Spacer(1, 8),
-    ]
-
-    for section in sections or []:
-        section_title = section.get("title") or "Section"
-        headers = section.get("headers") or []
-        rows = _normalize_rows(section.get("rows") or [])
-        if not rows:
-            rows = [["No data available"]]
-            if not headers:
-                headers = ["Data"]
-
-        story.append(Paragraph(_safe_cell(section_title), section_style))
-        story.append(Spacer(1, 4))
-        story.append(_build_data_table(headers, rows, doc.width, styles))
-        story.append(Spacer(1, 8))
-
-    decorator = _page_decorator(title, company_name, generated_at)
-    doc.build(story, onFirstPage=decorator, onLaterPages=decorator)
-    buffer.seek(0)
-    return buffer.read()
-
+# Handle export dispatch report pdf.
 
 def export_dispatch_report_pdf(
     headers: list,
@@ -437,7 +134,7 @@ def export_dispatch_report_pdf(
     MARGIN_H   = 18 * mm
     MARGIN_TOP = 36 * mm
     MARGIN_BOT = 20 * mm
-    AVAIL_W    = PAGE_W - 2 * MARGIN_H
+    AVAIL_W    = PAGE_W - 1.6 * MARGIN_H
  
     generated_at    = datetime.now().strftime("%d %B %Y, %H:%M")
     normalized_rows = [list(r) if not isinstance(r, list) else r for r in rows]
@@ -454,6 +151,7 @@ def export_dispatch_report_pdf(
         grouped.setdefault(display_date, []).append(row)
  
     # ── Page decorator ────────────────────────────────────────────────────────
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = A4
@@ -543,32 +241,8 @@ def export_dispatch_report_pdf(
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
  
-    # ── Helper: day data table ────────────────────────────────────────────────
-    def build_day_table(day_rows: list) -> Table:
-        col_w = AVAIL_W / max(len(headers), 1)
-        table_data = [[Paragraph(str(h), header_cell_style) for h in headers]]
-        for row in day_rows:
-            table_data.append([Paragraph(str(cell), data_cell_style) for cell in row])
- 
-        tbl = Table(table_data, colWidths=[col_w] * len(headers), repeatRows=1)
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND",     (0, 0), (-1, 0),  NAVY),
-            ("TOPPADDING",     (0, 0), (-1, 0),  9),
-            ("BOTTOMPADDING",  (0, 0), (-1, 0),  9),
-            ("TOPPADDING",     (0, 1), (-1, -1), 6),
-            ("BOTTOMPADDING",  (0, 1), (-1, -1), 6),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, ROW_ALT]),
-            ("LEFTPADDING",    (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING",   (0, 0), (-1, -1), 8),
-            ("VALIGN",         (0, 0), (-1, -1), "MIDDLE"),
-            ("LINEBELOW",      (0, 0), (-1, 0),  1.5, GOLD),
-            ("LINEBELOW",      (0, 1), (-1, -1), 0.4, RULE),
-            ("LINEAFTER",      (0, 0), (-2, -1), 0.4, RULE),
-            ("BOX",            (0, 0), (-1, -1), 0.8, RULE),
-        ]))
-        return tbl
- 
-    # ── Helper: date banner ───────────────────────────────────────────────────
+    # ── Helper: build date heading banner ─────────────────────────────────────
+
     def build_date_banner(display_date: str, record_count: int) -> Table:
         banner_data = [[
             Paragraph(display_date, date_heading_style),
@@ -596,20 +270,65 @@ def export_dispatch_report_pdf(
         topMargin=MARGIN_TOP, bottomMargin=MARGIN_BOT,
     )
  
-    story = [summary_tbl, Spacer(1, 7 * mm)]
+    story = [
+        summary_tbl,
+        Spacer(1, 5 * mm),
+    ]
  
     for i, (display_date, day_rows) in enumerate(grouped.items()):
-        story.append(KeepTogether([
-            build_date_banner(display_date, len(day_rows)),
-            Spacer(1, 1.5 * mm),
-            build_day_table(day_rows),
+        banner = build_date_banner(display_date, len(day_rows))
+        
+        # Add banner
+        story.append(banner)
+        story.append(Spacer(1, 1.5 * mm))
+        
+        # Build combined table: header + all data rows
+        col_w = AVAIL_W / len(headers)
+        combined_data = [[Paragraph(str(h), header_cell_style) for h in headers]]
+        
+        for row in day_rows:
+            combined_data.append([Paragraph(str(cell), data_cell_style) for cell in row])
+        
+        combined_tbl = Table(combined_data, colWidths=[col_w] * len(headers), repeatRows=1)
+        combined_tbl.setStyle(TableStyle([
+            # Header row styling
+            ("BACKGROUND",     (0, 0), (-1, 0),  NAVY),
+            ("TEXTCOLOR",      (0, 0), (-1, 0),  WHITE),
+            ("FONTNAME",       (0, 0), (-1, 0),  "Helvetica-Bold"),
+            ("FONTSIZE",       (0, 0), (-1, 0),  8),
+            ("TOPPADDING",     (0, 0), (-1, 0),  9),
+            ("BOTTOMPADDING",  (0, 0), (-1, 0),  9),
+            ("VALIGN",         (0, 0), (-1, 0),  "MIDDLE"),
+            ("ALIGN",          (0, 0), (-1, 0),  "CENTER"),
+            # Data rows
+            ("TOPPADDING",     (0, 1), (-1, -1), 6),
+            ("BOTTOMPADDING",  (0, 1), (-1, -1), 6),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, ROW_ALT]),
+            ("TEXTCOLOR",      (0, 1), (-1, -1), GREY_DARK),
+            ("FONTNAME",       (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE",       (0, 1), (-1, -1), 8),
+            ("VALIGN",         (0, 1), (-1, -1), "MIDDLE"),
+            # Shared
+            ("LEFTPADDING",    (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING",   (0, 0), (-1, -1), 8),
+            # Lines
+            ("LINEBELOW",      (0, 0), (-1, 0),  1.5, GOLD),
+            ("LINEBELOW",      (0, 1), (-1, -1), 0.4, RULE),
+            ("LINEAFTER",      (0, 0), (-2, -1), 0.4, RULE),
+            ("BOX",            (0, 0), (-1, -1), 0.8, RULE),
         ]))
+        
+        story.append(combined_tbl)
+        
+        # Gap between day sections (not after the last one)
         if i < len(grouped) - 1:
             story.append(Spacer(1, 6 * mm))
  
     doc.build(story, onFirstPage=decorator, onLaterPages=decorator)
     buffer.seek(0)
     return buffer.read()
+ 
+# Handle export dispatch entry report pdf.
 
 def export_dispatch_entry_report_pdf(
     headers: list,
@@ -636,7 +355,7 @@ def export_dispatch_entry_report_pdf(
     MARGIN_H   = 18 * mm
     MARGIN_TOP = 36 * mm
     MARGIN_BOT = 20 * mm
-    AVAIL_W    = PAGE_W - 2 * MARGIN_H
+    AVAIL_W    = PAGE_W - 1.6 * MARGIN_H
  
     generated_at    = datetime.now().strftime("%d %B %Y, %H:%M")
     normalized_rows = [list(r) if not isinstance(r, list) else r for r in rows]
@@ -650,6 +369,7 @@ def export_dispatch_entry_report_pdf(
         total_row = normalized_rows[-1]
  
     # ── Page decorator ────────────────────────────────────────────────────────
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = A4
@@ -808,11 +528,13 @@ def export_dispatch_entry_report_pdf(
     buffer.seek(0)
     return buffer.read()
 
+# Handle export raw material report pdf.
+
 def export_raw_material_report_pdf(
     headers: list,
     rows: list,
     company_name: str = "POULTRY NET",
-    date_column_index: int = 0,       # which column holds the date value
+    date_column_index: int = 0,
 ) -> bytes:
  
     # ── Palette ───────────────────────────────────────────────────────────────
@@ -826,7 +548,7 @@ def export_raw_material_report_pdf(
     WHITE      = HexColor("#FFFFFF")
     ROW_ALT    = HexColor("#F8FAFC")
     RULE       = HexColor("#D9DDE6")
-    DATE_BG    = HexColor("#E8EEF7")   # soft blue-grey for date heading row
+    DATE_BG    = HexColor("#E8EEF7")
  
     # ── Constants ─────────────────────────────────────────────────────────────
     PAGE_W, PAGE_H = A4
@@ -839,18 +561,18 @@ def export_raw_material_report_pdf(
     normalized_rows = [list(r) if not isinstance(r, list) else r for r in rows]
     styles          = getSampleStyleSheet()
  
-    # ── Group rows by date (preserves order of first appearance) ──────────────
+    # ── Group rows by date ────────────────────────────────────────────────────
     grouped: OrderedDict[str, list] = OrderedDict()
     for row in normalized_rows:
         date_key = str(row[date_column_index]).strip()
-        # Pretty-print date if it looks like YYYY-MM-DD
         try:
             display_date = datetime.strptime(date_key, "%Y-%m-%d").strftime("%d %B %Y")
         except ValueError:
             display_date = date_key
         grouped.setdefault(display_date, []).append(row)
  
-    # ── Page decorator (header + footer on every page) ────────────────────────
+    # ── Page decorator ────────────────────────────────────────────────────────
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = A4
@@ -948,36 +670,8 @@ def export_raw_material_report_pdf(
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
  
-    # ── Helper: build one day's data table ────────────────────────────────────
-    def build_day_table(day_rows: list) -> Table:
-        col_w = AVAIL_W / len(headers)
-        table_data = [[Paragraph(str(h), header_cell_style) for h in headers]]
-        for row in day_rows:
-            table_data.append([Paragraph(str(cell), data_cell_style) for cell in row])
- 
-        tbl = Table(table_data, colWidths=[col_w] * len(headers), repeatRows=1)
-        tbl.setStyle(TableStyle([
-            # Header row
-            ("BACKGROUND",     (0, 0), (-1, 0),  NAVY),
-            ("TOPPADDING",     (0, 0), (-1, 0),  9),
-            ("BOTTOMPADDING",  (0, 0), (-1, 0),  9),
-            # Data rows
-            ("TOPPADDING",     (0, 1), (-1, -1), 6),
-            ("BOTTOMPADDING",  (0, 1), (-1, -1), 6),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, ROW_ALT]),
-            # Shared
-            ("LEFTPADDING",    (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING",   (0, 0), (-1, -1), 8),
-            ("VALIGN",         (0, 0), (-1, -1), "MIDDLE"),
-            # Lines
-            ("LINEBELOW",      (0, 0), (-1, 0),  1.5, GOLD),
-            ("LINEBELOW",      (0, 1), (-1, -1), 0.4, RULE),
-            ("LINEAFTER",      (0, 0), (-2, -1), 0.4, RULE),
-            ("BOX",            (0, 0), (-1, -1), 0.8, RULE),
-        ]))
-        return tbl
- 
     # ── Helper: build date heading banner ─────────────────────────────────────
+
     def build_date_banner(display_date: str, entry_count: int) -> Table:
         banner_data = [[
             Paragraph(display_date, date_heading_style),
@@ -990,7 +684,7 @@ def export_raw_material_report_pdf(
             ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
             ("TOPPADDING",    (0, 0), (-1, -1), 7),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-            ("LINEBEFORE",    (0, 0), (0, -1),  3, NAVY),       # left accent bar
+            ("LINEBEFORE",    (0, 0), (0, -1),  3, NAVY),
             ("LINEBELOW",     (0, 0), (-1, -1), 0.5, RULE),
             ("ALIGN",         (1, 0), (1, 0),   "RIGHT"),
             ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
@@ -1007,20 +701,54 @@ def export_raw_material_report_pdf(
  
     story = [
         summary_tbl,
-        Spacer(1, 7 * mm),
+        Spacer(1, 5 * mm),
     ]
  
     for i, (display_date, day_rows) in enumerate(grouped.items()):
-        banner    = build_date_banner(display_date, len(day_rows))
-        day_table = build_day_table(day_rows)
- 
-        # KeepTogether keeps the banner + table header on the same page
-        story.append(KeepTogether([
-            banner,
-            Spacer(1, 1.5 * mm),
-            day_table,
+        banner = build_date_banner(display_date, len(day_rows))
+        
+        # Add banner
+        story.append(banner)
+        story.append(Spacer(1, 1.5 * mm))
+        
+        # Build combined table: header + all data rows
+        col_w = AVAIL_W / len(headers)
+        combined_data = [[Paragraph(str(h), header_cell_style) for h in headers]]
+        
+        for row in day_rows:
+            combined_data.append([Paragraph(str(cell), data_cell_style) for cell in row])
+        
+        combined_tbl = Table(combined_data, colWidths=[col_w] * len(headers), repeatRows=1)
+        combined_tbl.setStyle(TableStyle([
+            # Header row styling
+            ("BACKGROUND",     (0, 0), (-1, 0),  NAVY),
+            ("TEXTCOLOR",      (0, 0), (-1, 0),  WHITE),
+            ("FONTNAME",       (0, 0), (-1, 0),  "Helvetica-Bold"),
+            ("FONTSIZE",       (0, 0), (-1, 0),  8),
+            ("TOPPADDING",     (0, 0), (-1, 0),  9),
+            ("BOTTOMPADDING",  (0, 0), (-1, 0),  9),
+            ("VALIGN",         (0, 0), (-1, 0),  "MIDDLE"),
+            ("ALIGN",          (0, 0), (-1, 0),  "CENTER"),
+            # Data rows
+            ("TOPPADDING",     (0, 1), (-1, -1), 6),
+            ("BOTTOMPADDING",  (0, 1), (-1, -1), 6),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, ROW_ALT]),
+            ("TEXTCOLOR",      (0, 1), (-1, -1), GREY_DARK),
+            ("FONTNAME",       (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE",       (0, 1), (-1, -1), 8),
+            ("VALIGN",         (0, 1), (-1, -1), "MIDDLE"),
+            # Shared
+            ("LEFTPADDING",    (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING",   (0, 0), (-1, -1), 8),
+            # Lines
+            ("LINEBELOW",      (0, 0), (-1, 0),  1.5, GOLD),
+            ("LINEBELOW",      (0, 1), (-1, -1), 0.4, RULE),
+            ("LINEAFTER",      (0, 0), (-2, -1), 0.4, RULE),
+            ("BOX",            (0, 0), (-1, -1), 0.8, RULE),
         ]))
- 
+        
+        story.append(combined_tbl)
+        
         # Gap between day sections (not after the last one)
         if i < len(grouped) - 1:
             story.append(Spacer(1, 6 * mm))
@@ -1028,22 +756,21 @@ def export_raw_material_report_pdf(
     doc.build(story, onFirstPage=decorator, onLaterPages=decorator)
     buffer.seek(0)
     return buffer.read()
+ 
+# sections: list of dicts, each with:
+# {
+# "title":   "Raw Material Entry Details",
+# "headers": ["Field", "Value"],
+# "rows":    [("Entry Code", "RMX00001"), ("Date", "2026-04-06"), ...],
+# }
+# Two expected sections:
+# 1. Raw Material Entry Details  — Field / Value rows
+# 2. Lab Report                  — Parameter / Value rows
 
 def export_raw_material_entry_report_pdf(
     sections: list[dict],
     company_name: str = "POULTRY NET",
 ) -> bytes:
-    """
-    sections: list of dicts, each with:
-        {
-            "title":   "Raw Material Entry Details",
-            "headers": ["Field", "Value"],
-            "rows":    [("Entry ID", 3), ("Date", "2026-04-06"), ...],
-        }
-    Two expected sections:
-        1. Raw Material Entry Details  — Field / Value rows
-        2. Lab Report                  — Parameter / Value rows
-    """
  
     # ── Palette ───────────────────────────────────────────────────────────────
     NAVY        = HexColor("#0D2545")
@@ -1072,11 +799,12 @@ def export_raw_material_entry_report_pdf(
     # Pull basic meta from first section for the header badge
     first_rows = list(sections[0].get("rows") or []) if sections else []
     meta = {str(r[0]): str(r[1]) for r in first_rows if len(r) >= 2}
-    entry_id = meta.get("Entry ID", "—")
+    entry_code = meta.get("Entry Code") or "—"
     rm_type  = meta.get("RM Type",  "—")
     date_str = meta.get("Date",     "—")
  
     # ── Page decorator ────────────────────────────────────────────────────────
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = A4
@@ -1099,7 +827,7 @@ def export_raw_material_entry_report_pdf(
         canvas.setFillColor(WHITE)
         canvas.setFont("Helvetica", 7)
         canvas.drawRightString(meta_x, H - 11 * mm, f"Generated: {generated_at}")
-        canvas.drawRightString(meta_x, H - 18 * mm, f"Entry ID: {entry_id}  |  {rm_type}")
+        canvas.drawRightString(meta_x, H - 18 * mm, f"Entry Code: {entry_code}  |  {rm_type}")
  
         canvas.setFillColor(NAVY_LIGHT)
         canvas.roundRect(W - 36 * mm, H - 27 * mm, 16 * mm, 6 * mm, 1.5 * mm, fill=True, stroke=False)
@@ -1135,6 +863,7 @@ def export_raw_material_entry_report_pdf(
     )
  
     # ── Helper: section heading bar ───────────────────────────────────────────
+
     def build_section_heading(title: str) -> Table:
         t = Table([[Paragraph(title, section_title_style)]], colWidths=[AVAIL_W])
         t.setStyle(TableStyle([
@@ -1147,6 +876,7 @@ def export_raw_material_entry_report_pdf(
         return t
  
     # ── Helper: Field/Value or Parameter/Value — 2-column card ───────────────
+
     def build_field_value_table(rows: list) -> Table:
         normalized = [list(r) for r in (rows or [])]
         if not normalized:
@@ -1210,7 +940,7 @@ def export_raw_material_entry_report_pdf(
  
     banner_data = [[
         [
-            Paragraph(f"Entry #{entry_id} — {rm_type}", banner_id_style),
+            Paragraph(f"Entry #{entry_code} — {rm_type}", banner_id_style),
             Paragraph(f"Inward Date: {date_str}", banner_sub_style),
         ],
         [Paragraph("ENTRY RECORD", banner_tag_style)],
@@ -1256,6 +986,7 @@ def export_raw_material_entry_report_pdf(
     buffer.seek(0)
     return buffer.read()
 
+# Handle export production report pdf.
 
 def export_production_report_pdf(
     headers: list,
@@ -1278,7 +1009,7 @@ def export_production_report_pdf(
     DATE_BG     = HexColor("#E8EEF7")
  
     # ── Constants — landscape A4 ──────────────────────────────────────────────
-    PAGE_SIZE  = landscape(A4)
+    PAGE_SIZE  = A4                          # ← remove landscape()
     PAGE_W, PAGE_H = PAGE_SIZE
     MARGIN_H   = 18 * mm
     MARGIN_TOP = 36 * mm
@@ -1300,6 +1031,7 @@ def export_production_report_pdf(
         grouped.setdefault(display_date, []).append(row)
  
     # ── Page decorator ────────────────────────────────────────────────────────
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = PAGE_SIZE
@@ -1367,11 +1099,15 @@ def export_production_report_pdf(
     ]))
  
     # ── Helper: smart column widths ───────────────────────────────────────────
+
     def compute_col_widths(n_cols):
-        # Give equal width — landscape gives plenty of room
+        if n_cols == 9:
+            # Date, Batch No, Product, Batch Size, MOP, Water, Bags, Wt/Bag, Output
+            return [w * AVAIL_W for w in (0.13, 0.11, 0.18, 0.10, 0.09, 0.09, 0.10, 0.10, 0.10)]
         return [AVAIL_W / n_cols] * n_cols
- 
+    
     # ── Helper: day data table ────────────────────────────────────────────────
+
     def build_day_table(day_rows):
         col_widths = compute_col_widths(max(len(headers), 1))
         td = [[Paragraph(str(h), header_cell_style) for h in headers]]
@@ -1394,6 +1130,7 @@ def export_production_report_pdf(
         return tbl
  
     # ── Helper: date banner ───────────────────────────────────────────────────
+
     def build_date_banner(display_date, row_count):
         bd = [[
             Paragraph(display_date, date_heading_style),
@@ -1433,22 +1170,20 @@ def export_production_report_pdf(
     buffer.seek(0)
     return buffer.read()
 
+# sections: list of dicts, each with:
+# {
+# "title":   "Batch Details" | "Consumption Details" | etc.,
+# "headers": [...],
+# "rows":    [...],
+# }
+# Expected:
+# sections[0] = Batch Details       → rendered as card grid (like image 2)
+# sections[1] = Consumption Details → rendered as table with TOTAL row
 
 def export_batch_consumption_report_pdf(
     sections: list[dict],
     company_name: str = "POULTRY NET",
 ) -> bytes:
-    """
-    sections: list of dicts, each with:
-        {
-            "title":   "Batch Details" | "Consumption Details" | etc.,
-            "headers": [...],
-            "rows":    [...],
-        }
-    Expected:
-        sections[0] = Batch Details       → rendered as card grid (like image 2)
-        sections[1] = Consumption Details → rendered as table with TOTAL row
-    """
  
     # ── Palette ───────────────────────────────────────────────────────────────
     NAVY        = HexColor("#0D2545")
@@ -1483,6 +1218,7 @@ def export_batch_consumption_report_pdf(
     date_str  = meta.get("Date",      "—")
  
     # ── Page decorator ────────────────────────────────────────────────────────
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = A4
@@ -1551,6 +1287,7 @@ def export_batch_consumption_report_pdf(
     )
  
     # ── Helper: section heading bar ───────────────────────────────────────────
+
     def build_section_heading(title: str) -> Table:
         t = Table([[Paragraph(title, section_heading_style)]], colWidths=[AVAIL_W])
         t.setStyle(TableStyle([
@@ -1564,6 +1301,7 @@ def export_batch_consumption_report_pdf(
  
     # ── Helper: card grid (Image 2 style) ─────────────────────────────────────
     # Lays out field/value pairs in rows of `cols_per_row` cards side by side
+
     def build_card_grid(rows: list, cols_per_row: int = 5) -> Table:
         items = [(str(r[0]), str(r[1])) for r in (rows or []) if len(r) >= 2]
         if not items:
@@ -1610,6 +1348,7 @@ def export_batch_consumption_report_pdf(
         return tbl
  
     # ── Helper: consumption / regular table with optional TOTAL row ───────────
+
     def build_data_table(rows: list, headers: list) -> Table:
         normalized = [list(r) for r in (rows or [])]
         if not normalized:
@@ -1694,6 +1433,8 @@ def export_batch_consumption_report_pdf(
     buffer.seek(0)
     return buffer.read()
 
+# Handle export rm stock report pdf.
+
 def export_rm_stock_report_pdf(
     headers: list,
     rows: list,
@@ -1732,6 +1473,8 @@ def export_rm_stock_report_pdf(
             display_date = date_key
         grouped.setdefault(display_date, []).append(row)
  
+    # Handle decorator.
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = A4
@@ -1788,6 +1531,8 @@ def export_rm_stock_report_pdf(
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
  
+    # Build day table.
+
     def build_day_table(day_rows):
         col_w = AVAIL_W / max(len(headers), 1)
         td = [[Paragraph(str(h), header_cell_style) for h in headers]]
@@ -1808,6 +1553,8 @@ def export_rm_stock_report_pdf(
         ]))
         return tbl
  
+    # Build date banner.
+
     def build_date_banner(display_date, row_count):
         bd = [[
             Paragraph(display_date, date_heading_style),
@@ -1841,6 +1588,8 @@ def export_rm_stock_report_pdf(
     doc.build(story, onFirstPage=decorator, onLaterPages=decorator)
     buffer.seek(0)
     return buffer.read()
+
+# Handle export rm individual stock report pdf.
 
 def export_rm_individual_stock_report_pdf(
     headers: list,
@@ -1876,6 +1625,7 @@ def export_rm_individual_stock_report_pdf(
     styles          = getSampleStyleSheet()
  
     # ── Page decorator ────────────────────────────────────────────────────────
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = A4
@@ -2063,6 +1813,8 @@ def export_rm_individual_stock_report_pdf(
     buffer.seek(0)
     return buffer.read()
 
+# Handle export feed individual stock report pdf.
+
 def export_feed_individual_stock_report_pdf(
     headers: list,
     rows: list,
@@ -2097,6 +1849,7 @@ def export_feed_individual_stock_report_pdf(
     styles          = getSampleStyleSheet()
  
     # ── Page decorator ────────────────────────────────────────────────────────
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = A4
@@ -2303,6 +2056,8 @@ def export_feed_individual_stock_report_pdf(
     buffer.seek(0)
     return buffer.read()
 
+# Handle export feed stock report pdf.
+
 def export_feed_stock_report_pdf(
     headers: list,
     rows: list,
@@ -2341,6 +2096,8 @@ def export_feed_stock_report_pdf(
             display_date = date_key
         grouped.setdefault(display_date, []).append(row)
  
+    # Handle decorator.
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = A4
@@ -2397,6 +2154,8 @@ def export_feed_stock_report_pdf(
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
  
+    # Build day table.
+
     def build_day_table(day_rows):
         col_w = AVAIL_W / max(len(headers), 1)
         td = [[Paragraph(str(h), header_cell_style) for h in headers]]
@@ -2417,6 +2176,8 @@ def export_feed_stock_report_pdf(
         ]))
         return tbl
  
+    # Build date banner.
+
     def build_date_banner(display_date, row_count):
         bd = [[
             Paragraph(display_date, date_heading_style),
@@ -2450,6 +2211,8 @@ def export_feed_stock_report_pdf(
     doc.build(story, onFirstPage=decorator, onLaterPages=decorator)
     buffer.seek(0)
     return buffer.read()
+
+# Handle export overall stock report pdf.
 
 def export_overall_stock_report_pdf(
     sections: list[dict],
@@ -2510,6 +2273,7 @@ def export_overall_stock_report_pdf(
     low_count   = sum(1 for v in all_stock_values if 0 < v < 500)
  
     # ── Page decorator ────────────────────────────────────────────────────────
+
     def decorator(canvas, doc):
         canvas.saveState()
         W, H = A4
@@ -2612,6 +2376,7 @@ def export_overall_stock_report_pdf(
     ]))
  
     # ── Helper: build one section's styled table ───────────────────────────────
+
     def build_section_table(headers, rows):
         num_cols   = len(headers)
         col_widths = [AVAIL_W / num_cols] * num_cols  # distribute evenly
@@ -2710,6 +2475,8 @@ def export_overall_stock_report_pdf(
     buffer.seek(0)
     return buffer.read()
 
+# Handle export dispatch report excel.
+
 def export_dispatch_report_excel(headers: list, rows: list) -> bytes:
     wb = Workbook()
     ws = wb.active
@@ -2758,6 +2525,7 @@ def export_dispatch_report_excel(headers: list, rows: list) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+# Handle export dispatch entry report excel.
 
 def export_dispatch_entry_report_excel(headers: list, rows: list) -> bytes:
     wb = Workbook()
@@ -2807,6 +2575,7 @@ def export_dispatch_entry_report_excel(headers: list, rows: list) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+# Handle export raw material report excel.
 
 def export_raw_material_report_excel(headers: list, rows: list) -> bytes:
     wb = Workbook()
@@ -2856,6 +2625,7 @@ def export_raw_material_report_excel(headers: list, rows: list) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+# Handle export raw material entry report excel.
 
 def export_raw_material_entry_report_excel(sections: list[dict]) -> bytes:
     wb = Workbook()
@@ -2912,6 +2682,7 @@ def export_raw_material_entry_report_excel(sections: list[dict]) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+# Handle export production report excel.
 
 def export_production_report_excel(headers: list, rows: list) -> bytes:
     wb = Workbook()
@@ -2961,6 +2732,7 @@ def export_production_report_excel(headers: list, rows: list) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+# Handle export batch report excel.
 
 def export_batch_report_excel(headers: list, rows: list) -> bytes:
     wb = Workbook()
@@ -3010,6 +2782,7 @@ def export_batch_report_excel(headers: list, rows: list) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+# Handle export batch consumption report excel.
 
 def export_batch_consumption_report_excel(sections: list[dict]) -> bytes:
     wb = Workbook()
@@ -3066,6 +2839,7 @@ def export_batch_consumption_report_excel(sections: list[dict]) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+# Handle export rm stock report excel.
 
 def export_rm_stock_report_excel(headers: list, rows: list) -> bytes:
     wb = Workbook()
@@ -3115,6 +2889,7 @@ def export_rm_stock_report_excel(headers: list, rows: list) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+# Handle export rm individual stock report excel.
 
 def export_rm_individual_stock_report_excel(headers: list, rows: list) -> bytes:
     wb = Workbook()
@@ -3164,6 +2939,7 @@ def export_rm_individual_stock_report_excel(headers: list, rows: list) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+# Handle export feed individual stock report excel.
 
 def export_feed_individual_stock_report_excel(headers: list, rows: list) -> bytes:
     wb = Workbook()
@@ -3213,6 +2989,7 @@ def export_feed_individual_stock_report_excel(headers: list, rows: list) -> byte
     buffer.seek(0)
     return buffer.read()
 
+# Handle export feed stock report excel.
 
 def export_feed_stock_report_excel(headers: list, rows: list) -> bytes:
     wb = Workbook()
@@ -3262,6 +3039,7 @@ def export_feed_stock_report_excel(headers: list, rows: list) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
+# Handle export overall stock report excel.
 
 def export_overall_stock_report_excel(sections: list[dict]) -> bytes:
     wb = Workbook()
@@ -3318,50 +3096,7 @@ def export_overall_stock_report_excel(sections: list[dict]) -> bytes:
     buffer.seek(0)
     return buffer.read()
 
-
-def export_table_to_excel(title: str, headers: list, rows: list, sheet_name: str = "Sheet1") -> bytes:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name[:31]
-    ws.append([title])
-    ws.append([])
-    ws.append(headers)
-    for row in rows:
-        ws.append(list(row))
-    for cell in ws[3]:
-        cell.font = Font(bold=True)
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    return buffer.read()
-
-
-def export_multi_table_to_excel(title: str, sections: list[dict]) -> bytes:
-    wb = Workbook()
-    if not sections:
-        sections = [{"title": "Data", "headers": ["Data"], "rows": []}]
-
-    for idx, section in enumerate(sections):
-        ws = wb.active if idx == 0 else wb.create_sheet()
-        ws.title = str(section.get("sheet_name") or section.get("title") or f"Sheet{idx + 1}")[:31]
-        headers = section.get("headers") or []
-        rows = _normalize_rows(section.get("rows") or [])
-
-        ws.append([title])
-        ws.append([str(section.get("title") or "Section")])
-        ws.append([])
-        ws.append(headers or ["Data"])
-        for row in rows:
-            ws.append(list(row))
-
-        for cell in ws[4]:
-            cell.font = Font(bold=True)
-
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    return buffer.read()
-
+# Handle export table to csv.
 
 def export_table_to_csv(headers: list, rows: list) -> str:
     import csv
@@ -3371,30 +3106,9 @@ def export_table_to_csv(headers: list, rows: list) -> str:
     writer.writerow(headers)
     writer.writerows(rows)
     return output.getvalue()
+ 
+# Handle export batch report pdf.
 
-
-import io
-import random
-from datetime import datetime, timezone, timedelta
- 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
-import numpy as np
- 
-from reportlab.lib import colors
-from reportlab.lib.colors import HexColor
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import mm
-from reportlab.platypus import (
-    Image, PageBreak, Paragraph,
-    SimpleDocTemplate, Spacer, Table, TableStyle,
-)
- 
- 
 def export_batch_report_pdf(
     batch,
     report,
@@ -3441,6 +3155,8 @@ def export_batch_report_pdf(
             return t if t else "0"
         return str(v)
  
+    # Handle fmt date.
+
     def _fmt_date(value):
         if value is None:
             return "-"
@@ -3449,6 +3165,8 @@ def export_batch_report_pdf(
             return utc.astimezone(IST_TZ).strftime("%d %b %Y")
         return str(value)
  
+    # Handle fmt ts.
+
     def _fmt_ts(value):
         if value is None:
             return "-"
@@ -3457,6 +3175,8 @@ def export_batch_report_pdf(
             return utc.astimezone(IST_TZ).strftime("%d %b %Y %I:%M:%S %p IST")
         return str(value)
  
+    # Handle panel.
+
     def _panel(title, content, width):
         ts = ParagraphStyle("PT", fontSize=9, fontName="Helvetica-Bold",
                              textColor=WHITE, alignment=TA_CENTER)
@@ -3473,6 +3193,8 @@ def export_batch_report_pdf(
         ]))
         return box
  
+    # Handle data table.
+
     def _data_table(headers, rows, width, col_ratios=None):
         n  = len(headers)
         cw = [width * r for r in (col_ratios or [1 / n] * n)]
@@ -3505,6 +3227,8 @@ def export_batch_report_pdf(
         tbl.setStyle(TableStyle(cmds))
         return tbl
  
+    # Handle page decorator.
+
     def _page_decorator(canvas, doc):
         W, H = A4
         canvas.saveState()
@@ -3569,6 +3293,8 @@ def export_batch_report_pdf(
             "lines.marker":       "o",
         })
  
+    # Handle time labels.
+
     def _time_labels(rows, n):
         if rows:
             labels = []
@@ -3586,6 +3312,8 @@ def export_batch_report_pdf(
         base = datetime(2024, 1, 1, 11, 2, 35)
         return [(base + timedelta(seconds=i * 15)).strftime("%H:%M:%S") for i in range(n)]
  
+    # Set xticks.
+
     def _set_xticks(ax, xs, labels):
         step = max(1, len(xs) // 8)
         idx  = list(range(0, len(xs), step))
@@ -3593,14 +3321,20 @@ def export_batch_report_pdf(
         ax.set_xticklabels([labels[i] for i in idx], rotation=0, ha="center")
         ax.set_xlabel("Time", labelpad=3)
  
+    # Handle avg line.
+
     def _avg_line(ax, data, color):
         avg = float(np.mean(data))
         ax.axhline(avg, color=color, linestyle="--", linewidth=1.0, alpha=0.8, zorder=4)
         return avg
  
+    # Handle fill.
+
     def _fill(ax, xs, data, color):
         ax.fill_between(xs, data, alpha=0.08, color=color, zorder=1)
  
+    # Save value.
+
     def _save(fig):
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
@@ -3609,11 +3343,14 @@ def export_batch_report_pdf(
         buf.seek(0)
         return buf
  
+    # Handle img.
+
     def _img(buf, w, h):
         buf.seek(0)
         return Image(buf, width=w, height=h)
  
     # Graph 1 – Temperature Trends  (Y: 0–100 step 10)
+
     def _graph_temperature(rows, w_pt, h_pt):
         n  = len(rows) if rows else 100
         xs = np.arange(n)
@@ -3658,6 +3395,7 @@ def export_batch_report_pdf(
         return _save(fig)
  
     # Graph 2 – Pressure Trends  (Y: 0–5 step 1)
+
     def _graph_pressure(rows, w_pt, h_pt):
         n  = len(rows) if rows else 100
         xs = np.arange(n)
@@ -3692,13 +3430,14 @@ def export_batch_report_pdf(
         return _save(fig)
  
     # Graph 3 – Feeder Speed vs Load  (Left Y: 0–1500 step 150 | Right Y: 0–300 step 30)
+
     def _graph_feeder(rows, w_pt, h_pt):
         n  = len(rows) if rows else 100
         xs = np.arange(n)
         tl = _time_labels(rows, n)
         if rows:
-            spd = np.array([getattr(r, "feeder_speed", 120) for r in rows], dtype=float)
-            ld  = np.array([getattr(r, "feeder_load", 73) for r in rows], dtype=float)
+            spd = np.array([getattr(r, "pellet_feeder_speed", 120) for r in rows], dtype=float)
+            ld  = np.array([getattr(r, "pellet_motor_load", 73) for r in rows], dtype=float)
         else:
             spd = np.clip(120 + np.cumsum(np.random.randn(n) * 0.5) * 0.3,  80, 200)
             ld  = np.clip( 73 + np.cumsum(np.random.randn(n) * 0.8) * 0.2,  30, 120)
@@ -3782,6 +3521,8 @@ def export_batch_report_pdf(
     val_s = ParagraphStyle("BV", fontSize=9, fontName="Helvetica-Bold",
                             textColor=NAVY, leading=12)
  
+    # Handle bcell.
+
     def _bcell(label, value):
         return Table(
             [[Paragraph(label, lbl_s)], [Paragraph(_safe(value), val_s)]],
@@ -3820,10 +3561,33 @@ def export_batch_report_pdf(
     story.append(_panel("Batch Summary", batch_inner, W))
     story.append(Spacer(1, 7 * mm))
  
-    # Raw materials
-    mat_rows = [[m.rm_name, m.quantity] for m in materials] or [["No materials recorded", "-"]]
+    # Raw materials (show actual consumed quantity where available).
+
+    def _material_name(row):
+        if isinstance(row, dict):
+            return row.get("rm_name", "")
+        return getattr(row, "rm_name", "")
+
+    # Handle material quantity.
+
+    def _material_quantity(row):
+        if isinstance(row, dict):
+            if row.get("_report_quantity") is not None:
+                return row.get("_report_quantity")
+            if row.get("total_quantity") is not None:
+                return row.get("total_quantity")
+            return row.get("quantity")
+        report_quantity = getattr(row, "_report_quantity", None)
+        if report_quantity is not None:
+            return report_quantity
+        total_quantity = getattr(row, "total_quantity", None)
+        if total_quantity is not None:
+            return total_quantity
+        return getattr(row, "quantity", None)
+
+    mat_rows = [[_material_name(m), _material_quantity(m)] for m in materials] or [["No materials recorded", "-"]]
     story.append(_panel("Raw Material Consumption",
-                         _data_table(["Material", "Quantity"], mat_rows, W,
+                         _data_table(["Material", "Consumed Quantity (kg)"], mat_rows, W,
                                      col_ratios=[0.65, 0.35]), W))
     story.append(Spacer(1, 7 * mm))
  

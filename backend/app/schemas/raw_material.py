@@ -3,6 +3,8 @@ from typing import Optional
 from datetime import datetime
 
 
+# Schema model for `RawMaterialEntryCreate` request/response payloads.
+
 class RawMaterialEntryCreate(BaseModel):
     date: datetime
     rm_type: str
@@ -13,11 +15,12 @@ class RawMaterialEntryCreate(BaseModel):
     remarks: Optional[str] = None
 
 
+# Schema model for `LabReportCreate` request/response payloads.
+
 class LabReportCreate(BaseModel):
-    entry_id: int
+    entry_code: str
     protein: Optional[float] = None
     fat: Optional[float] = None
-    nitrogen: Optional[float] = None
     fiber: Optional[float] = None
     ash: Optional[float] = None
     calcium: Optional[float] = None
@@ -35,8 +38,10 @@ class LabReportCreate(BaseModel):
     smell: Optional[str] = None
 
 
+# Schema model for `RawMaterialEntryResponse` request/response payloads.
+
 class RawMaterialEntryResponse(BaseModel):
-    id: int
+    entry_code: str
     date: datetime
     rm_type: str
     supplier: str
@@ -48,17 +53,23 @@ class RawMaterialEntryResponse(BaseModel):
     created_at: datetime
     last_modified_at: Optional[datetime] = None
 
+    # Enable ORM-to-schema attribute mapping for response models.
+
     class Config:
         from_attributes = True
 
 
+# Schema model for `LabReportResponse` request/response payloads.
+
 class LabReportResponse(BaseModel):
-    id: int
-    entry_id: int
+    entry_code: str
     protein: Optional[float] = None
     fat: Optional[float] = None
     moisture: Optional[float] = None
     created_at: datetime
+    last_modified_at: Optional[datetime] = None
+
+    # Enable ORM-to-schema attribute mapping for response models.
 
     class Config:
         from_attributes = True

@@ -7,10 +7,15 @@ import usePinGate from "../hooks/usePinGate"
 import { formatDateTimeIST } from "../utils/datetime"
 import eyeoff from "../pages/assets/eye.png"
 import eye from "../pages/assets/eye-off.png"
+import { Clock, Trash2, IdCard, Database } from "lucide-react";
+// Settings page for master data, recipes, and access PIN management.
 const EMPTY_RECIPE_MATERIAL = { rm_name: "", quantity: "" }
+const MAX_RECIPE_ID = 20
 
 const initialRecipeForm = () => ({
+  recipe_id: "",
   name: "",
+  add_to_product_type: false,
   materials: [{ ...EMPTY_RECIPE_MATERIAL }],
 })
 
@@ -37,9 +42,12 @@ const [showConfirmPin, setShowConfirmPin] = useState(false);
   const [editingRmType, setEditingRmType] = useState(null)
   const [rmTypeFormName, setRmTypeFormName] = useState("")
   const [showEditProductType, setShowEditProductType] = useState(false)
+  const [showAddProductType, setShowAddProductType] = useState(false)
   const [productTypeError, setProductTypeError] = useState('')
+  const [productTypeAddError, setProductTypeAddError] = useState('')
   const [editingProductType, setEditingProductType] = useState(null)
   const [productTypeFormName, setProductTypeFormName] = useState("")
+  const [newProductType, setNewProductType] = useState("")
   const [showAddRecipe, setShowAddRecipe] = useState(false)
   const [recipeError, setRecipeError] = useState('')
   const [editingRecipeId, setEditingRecipeId] = useState(null)
@@ -65,6 +73,16 @@ const [showError, setShowError] = useState(false)
     configApi.productTypesManage().then(({ data }) => setProductTypes(Array.isArray(data) ? data : []))
     configApi.recipes().then(({ data }) => setRecipes(Array.isArray(data) ? data : []))
   }
+
+  const usedRecipeIds = new Set(
+    recipes
+      .map((recipe) => Number(recipe?.id))
+      .filter((value) => Number.isInteger(value) && value > 0)
+  )
+  const recipeIdOptions = Array.from({ length: MAX_RECIPE_ID }, (_, index) => index + 1)
+    .filter((id) => !usedRecipeIds.has(id) || id === Number(recipeForm.recipe_id))
+  const availableRecipeIds = Array.from({ length: MAX_RECIPE_ID }, (_, index) => index + 1)
+    .filter((id) => !usedRecipeIds.has(id))
 
   useEffect(() => { load() }, [])
 
@@ -142,6 +160,36 @@ const handleClosePopup = () => {
     setProductTypeError('')
   }
 
+  const openAddProductTypeModal = () => {
+    setNewProductType("")
+    setProductTypeAddError("")
+    setShowAddProductType(true)
+  }
+
+  const closeAddProductTypeModal = () => {
+    setShowAddProductType(false)
+    setNewProductType("")
+    setProductTypeAddError("")
+  }
+
+  const saveProductTypeAdd = async (e) => {
+    e.preventDefault()
+    setProductTypeAddError('')
+    const value = newProductType.trim()
+    if (!value) {
+      setProductTypeAddError("Product type name is required.")
+      return
+    }
+    try {
+      await configApi.addProductType(value)
+      closeAddProductTypeModal()
+      load()
+    } catch (err) {
+      const detail = err?.response?.data?.detail || "Unable to add product type."
+      setProductTypeAddError(detail)
+    }
+  }
+
   const saveProductTypeEdit = async (e) => {
     e.preventDefault()
     setProductTypeError('')
@@ -212,7 +260,10 @@ const handleClosePopup = () => {
 
   const openAddRecipeModal = () => {
     setEditingRecipeId(null)
-    setRecipeForm(initialRecipeForm())
+    setRecipeForm({
+      ...initialRecipeForm(),
+      recipe_id: availableRecipeIds[0] ? String(availableRecipeIds[0]) : "",
+    })
     setRecipeError('')
     setShowAddRecipe(true)
   }
@@ -227,7 +278,9 @@ const handleClosePopup = () => {
 
     setEditingRecipeId(recipe?.id ?? null)
     setRecipeForm({
+      recipe_id: recipe?.id ? String(recipe.id) : "",
       name: recipe?.name || "",
+      add_to_product_type: productTypes.some((item) => item.name === recipe?.name),
       materials,
       created_at: recipe?.created_at || null,
     })
@@ -258,16 +311,34 @@ const handleClosePopup = () => {
       setRecipeError("Each row must include raw material and weight greater than 0.")
       return
     }
+    const recipeId = Number(recipeForm.recipe_id)
+    if (!Number.isInteger(recipeId) || recipeId < 1 || recipeId > MAX_RECIPE_ID) {
+      setRecipeError(`Recipe ID must be between 1 and ${MAX_RECIPE_ID}.`)
+      return
+    }
+    if (editingRecipeId) {
+      if (recipeId !== editingRecipeId && usedRecipeIds.has(recipeId)) {
+        setRecipeError(`Recipe ID ${recipeId} is already in use.`)
+        return
+      }
+    } else if (usedRecipeIds.has(recipeId)) {
+      setRecipeError(`Recipe ID ${recipeId} is already in use.`)
+      return
+    }
 
     try {
       if (editingRecipeId) {
         await configApi.updateRecipe(editingRecipeId, {
+          recipe_id: recipeId,
           name: recipeForm.name.trim(),
+          add_to_product_type: Boolean(recipeForm.add_to_product_type),
           materials,
         })
       } else {
         await configApi.addRecipe({
+          recipe_id: Number(recipeForm.recipe_id),
           name: recipeForm.name.trim(),
+          add_to_product_type: Boolean(recipeForm.add_to_product_type),
           materials,
         })
       }
@@ -296,6 +367,7 @@ const handleClosePopup = () => {
     try {
       await configApi.deleteRecipe(recipeToDelete.id)
       setRecipeToDelete(null)
+        closeRecipeModal()   
       load()
     } catch (err) {
       const detail = err?.response?.data?.detail || "Unable to delete recipe."
@@ -361,15 +433,15 @@ const handleClosePinModal = () => {
   }
 
   return (
-    <div>
+    <div className="pb-2 md:pb-28 lg:pb-0">
       <div className='flex items-center justify-between '>
       <h1 className="text-xl font-semibold mb-8">Settings</h1>
        <div>
   <button
     onClick={() => setShowPinModal(true)}
-    className="bg-[#245658] hover:bg-[#1d4446] text-white px-6 py-2 rounded-lg shadow-md transition mb-5"
+    className="bg-[#245658] hover:bg-[#1d4446] text-white px-3 md:px-6 py-2 rounded-lg shadow-md transition mb-5 text-wrap"
   >
-    Change Access PIN
+    Change Access Pin
   </button>
 </div>
 
@@ -378,7 +450,7 @@ const handleClosePinModal = () => {
   <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
     
     {/* Modal Box */}
-    <div className="bg-white w-full max-w-lg rounded-xl shadow-2xl p-6 relative animate-fadeIn">
+    <div className="bg-white w-full max-w-lg rounded-xl shadow-2xl p-3 lg:p-6 relative animate-fadeIn m-4">
       
       {/* Close Button */}
       <button
@@ -521,9 +593,9 @@ const handleClosePinModal = () => {
   </div>
 )}
 </div>
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <div className="grid grid-cols-1 xl:grid-cols-10 gap-8">
         {/* RM TYPES - LEFT COLUMN */}
-        <div className="border border-gray-400 rounded-lg p-4">
+        <div className="border border-gray-400 rounded-lg p-4 col-span-4 xl:col-span-3 ">
           <div className="flex items-center justify-between gap-3">
           <h2 className="font-medium mb-3">Raw Material Types</h2>
           <button
@@ -625,24 +697,25 @@ const handleClosePinModal = () => {
             </button>
           </div> */}
 
-          <div className="mt-4  rounded-md p-3 bg-slate-50">
+         <div className="mt-4 rounded-md p-3 bg-slate-50 ">
             <p className="text-sm font-medium text-slate-700 mb-2">
               Available Raw Material Types ({rmTypes.length})
             </p>
+            <div className='max-h-[1000px] overflow-y-auto'>
             {rmTypes.length === 0 ? (
               <p className="text-sm text-slate-500">No raw material types found.</p>
             ) : (
               <ul className="space-y-2 text-slate-700">
                 {rmTypes.map((t) => (
-                  <li key={t.id} className="flex items-center justify-between gap-2 border border-slate-200 rounded-md bg-white px-3 py-2">
-                    <div>
-                      <span>{t.name}</span>
+                  <li key={t.id} className="flex flex-col  justify-between gap-2 border border-slate-200 rounded-md bg-white px-3 py-2  shadow-md">
+                                        <div className="flex justify-between items-start gap-2 p-2">
+
+                                  <div className="flex-1 min-w-0">
+                                                  <span className="font-medium break-all line-clamp-3">{t.name}</span>
                     </div>
-                    <div className="flex flex-col items-end gap-2">
-                      <p className="text-xs text-slate-500">
-                        Last Modified: {formatDateTimeIST(t.last_modified_at || t.created_at)}
-                      </p>
-                      <div className="flex gap-2">
+                    {/* <div className="flex flex-col items-end gap-2"> */}
+                     
+                      <div className="flex gap-2 sm:flex-row flex-col">
                         <button
                           type="button"
                           onClick={() => requestPin(
@@ -664,16 +737,32 @@ const handleClosePinModal = () => {
                           Delete
                         </button>
                       </div>
-                    </div>
+
+    </div>
+
+                      <div className="border-t border-dashed border-gray-300"></div>
+
+                         <div className='flex my-1 justify-start items-center gap-1'>
+
+                                            <Clock size={15} className="text-gray-500" />
+
+                       <p className="text-xs text-slate-500">
+                        Last Modified: {t.last_modified_at 
+                          ? formatDateTimeIST(t.last_modified_at) 
+                          : "N/A"} </p>
+                          </div>
+                  
                   </li>
                 ))}
               </ul>
             )}
+            </div>
           </div>
         </div>
 
         {/* RECIPES - RIGHT COLUMN */}
-        <div className="border  border-gray-400 rounded-lg p-4">
+      
+        <div className="col-span-4 border  border-gray-400 rounded-lg p-4">
           <div className="flex items-center justify-between gap-3">
             <h2 className="font-medium">Recipes</h2>
             <button
@@ -685,89 +774,110 @@ const handleClosePinModal = () => {
             </button>
           </div>
 
-          <div className="mt-4 rounded-md p-3 bg-slate-50">
-            <p className="text-sm font-medium text-slate-700 mb-2">
+<div className="mt-4 rounded-md p-3 bg-slate-50 ">        
+      <p className="text-sm font-medium text-slate-700 mb-2">
               Available Recipes ({recipes.length})
             </p>
+            <div className='max-h-[1000px] overflow-y-auto'>
             {recipes.length === 0 ? (
               <p className="text-sm text-slate-500">No recipes found.</p>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-4">
                 {recipes.map((recipe) => (
-                  <div key={recipe.id} className="border border-slate-200 rounded-md p-3 bg-white">
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="font-medium text-slate-800">{recipe.name}</p>
-                        <p className="text-xs text-slate-500 mt-1">
-                          Recipe ID: {recipe.id ?? "—"}
-                        </p>
-                      </div>
-                      <div className="flex flex-col items-end gap-2">
-                        <p className="text-xs text-slate-500">
-                          Last Modified: {formatDateTimeIST(recipe.last_modified_at || recipe.created_at)}
-                        </p>
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openViewRecipeModal(recipe)}
-                            className="px-3 py-1 rounded border border-gray-400 text-xs text-gray-800 hover:bg-gray-100"
-                          >
-                            View
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => requestPin(
-                              () => openEditRecipeModal(recipe),
-                              { title: 'PIN Required', message: 'Enter PIN to edit (1234) recipe.', pinType: 'recipe_access' }
-                            )}
-                            className="px-3 py-1 rounded border border-gray-400 text-xs text-gray-800 hover:bg-gray-100"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => requestPin(
-                              () => deleteRecipe(recipe),
-                              { title: 'PIN Required', message: 'Enter PIN to delete recipe.', pinType: 'recipe_access' }
-                            )}
-                            className="px-3 py-1 rounded border border-red-300 text-xs text-red-700 hover:bg-red-50"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
+                  
+                  <div key={recipe.id}      className="bg-[#ffff] border border-gray-200 rounded-2xl p-5 shadow-md transition-all">
+                <div className="flex justify-between items-start gap-3 ">
+                       <div>
+                    <h3 className="text-lg text-wrap break-all font-semibold text-[#1f3d3d]  max-w-[250px]  lg:max-w-[410px] "> {recipe.name} </h3>                          
+                       <div className="mt-3 inline-flex items-center gap-3 bg-gray-200 px-3 py-1 rounded-lg text-[0.7rem] text-gray-600  sm:flex-row flex-col">
+                            <div className='flex items-center gap-1 '> 
+                              <IdCard size={14} className="text-gray-600" />
+                                <p className="text-[0.7rem] text-slate-500 ">
+                              Recipe ID: {recipe.id ?? "—"}
+                            </p>
+                          </div>
+                                  
+                            <div className='flex items-center gap-1'> 
+                                    <Database size={12} className="text-gray-600" /> Materials : {""}
+                                      {Array.isArray(recipe.materials) ? recipe.materials.length : 0} 
+                                    </div>
+                                    </div>
+                           </div>
+ </div>
+
+                            <div className="my-4   border-t border-dashed border-gray-300"></div>
+                           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                <p className="text-[0.7rem] text-gray-500 flex items-center gap-1">
+                                    <Clock size={15} className="text-gray-500" />
+                              Last Modified: {
+  recipe?.last_modified_at
+    ? formatDateTimeIST(recipe.last_modified_at)
+    : "N/A"
+}
+                                </p>
+                                        <div className="flex gap-2 ">
+                                          <button
+                                            type="button"
+                                            onClick={() => openViewRecipeModal(recipe)}
+                            className="px-3 py-1  rounded-md border border-blue-700 text-blue-700 hover:bg-gray-100 text-xs"
+                                          >
+                                            View
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => requestPin(
+                                              () => openEditRecipeModal(recipe),
+                                              { title: 'PIN Required', message: 'Enter PIN to edit (1234) recipe.', pinType: 'recipe_access' }
+                                            )}
+                            className="px-4 py-1 rounded-md bg-[#245658] text-white hover:bg-[#1d4446] text-xs flex items-center gap-1"
+                                          >
+                                            Edit
+                                          </button>
+                                    
+                                        </div>
+                         </div>
                     </div>
-                    <p className="text-xs text-slate-500 mt-1">
-                      {Array.isArray(recipe.materials) ? recipe.materials.length : 0} materials
-                    </p>
-                  </div>
+
                 ))}
+             
               </div>
-            )}
+            )}   
+             </div>
           </div>
         </div>
 
-              <div className="border border-gray-400 rounded-lg p-4 ">
+              <div className=" col-span-4 xl:col-span-3 border border-gray-400 rounded-lg p-4 ">
+        <div className="flex items-center justify-between gap-3">
         <h2 className="font-medium mb-3">Product Types</h2>
+          <button
+            type="button"
+            onClick={openAddProductTypeModal}
+            className="px-2 py-2 bg-[#245658] text-white rounded"
+          >
+            + Add Product Type
+          </button>
+        </div>
 
-        <div className="mt-4 rounded-md p-3 bg-slate-50">
-          <p className="text-sm font-medium text-slate-700 mb-2">
+<div className="mt-4 rounded-md p-3 bg-slate-50 ">
+            <p className="text-sm font-medium text-slate-700 mb-2">
             Available Product Types ({productTypes.length})
           </p>
+          <div className='max-h-[1000px] overflow-y-auto'>
           {productTypes.length === 0 ? (
             <p className="text-sm text-slate-500">No product types found.</p>
           ) : (
             <ul className="space-y-2 text-slate-700">
               {productTypes.map((t) => (
-                <li key={t.id} className="flex items-center justify-between gap-2 border border-slate-200 rounded-md bg-white px-3 py-2">
-                  <div>
-                    <span>{t.name}</span>
+                <li key={t.id} className="flex flex-col  justify-between gap-2 border border-slate-200 rounded-md bg-white px-3 py-2 shadow-md">
+                                    <div className="flex items-start  justify-between gap-2 p-2">
+
+                    <div className="flex-1 min-w-0">
+                     <span className="font-medium break-all line-clamp-3">
+
+                      {t.name}</span>
                   </div>
-                  <div className="flex flex-col items-end gap-2">
-                    <p className="text-xs text-slate-500">
-                      Last Modified: {formatDateTimeIST(t.last_modified_at || t.created_at)}
-                    </p>
-                    <div className="flex gap-2">
+
+                    <div className="flex gap-2 sm:flex-row flex-col">
                       <button
                         type="button"
                         onClick={() => requestPin(
@@ -788,27 +898,79 @@ const handleClosePinModal = () => {
                       >
                         Delete
                       </button>
+                
+   </div>
+      </div>
+{/* copied */}
+<div>
+ <div className="border-t border-dashed border-gray-300"></div>
+                    <div className='flex my-1 justify-start items-center gap-1'>
+                      <Clock size={15} className="text-gray-500" />
+                       <p className="text-xs text-slate-500 break-words">
+                           
+                      Last Modified: {t.last_modified_at ? formatDateTimeIST(t.last_modified_at) : "N/A"}
+                    </p>
                     </div>
+
                   </div>
                 </li>
               ))}
             </ul>
           )}
         </div>
+        </div>  
       </div>
-      </div>
+    
 
 
 
       <Modal open={showAddRecipe} onClose={closeRecipeModal} title={editingRecipeId ? "Edit Recipe" : "Add Recipe"}>
-        <form onSubmit={handleSaveRecipe} className="space-y-4 relative">
+        <form onSubmit={handleSaveRecipe} className="space-y-3 relative pt-2 pb-16 md:pb-0">
+             {editingRecipeId && (
+  <button
+    type="button"
+    onClick={() =>
+      requestPin(
+        () => setRecipeToDelete({ id: editingRecipeId, name: recipeForm.name }),
+        { title: 'PIN Required', message: 'Enter PIN to delete recipe.', pinType: 'recipe_access' }
+      )
+    }
+    className="absolute top-0 right-1 px-2 py-1 rounded-md hover:text-red-800 bg-red-600 "
+  >
+    <div className='flex items-center gap-2  text-white'>  
+    <Trash2 size={18} className='w-5 h-5' /> 
+    <h5 className='hidden md:block'>Delete Recipe</h5>
+    </div>
+  
+  </button>
+)}
+     
           {recipeError && (
             <div className="bg-red-100 text-red-800 px-4 py-3 rounded-lg text-sm border border-red-300">
               {recipeError}
             </div>
           )}
           <div>
-            <label className="block text-sm text-black mb-1">Recipe Name (Product Name)</label>
+            <div className="mb-3">
+              <label className="block text-sm text-black mb-1">Recipe ID</label>
+              <select
+                value={recipeForm.recipe_id}
+                onChange={(e) => setRecipeForm((prev) => ({ ...prev, recipe_id: e.target.value }))}
+                className="w-full px-3 py-2 rounded border border-gray-300"
+                required
+              >
+                <option value="">Select Recipe ID</option>
+                {recipeIdOptions.map((id) => (
+                  <option key={id} value={id}>
+                    {id}
+                  </option>
+                ))}
+              </select>
+              {!editingRecipeId && availableRecipeIds.length === 0 && (
+                <p className="mt-1 text-xs text-red-600">All recipe IDs from 1 to 20 are already used.</p>
+              )}
+            </div>
+            <label className="block text-sm text-black mb-1">Recipe Name</label>
             <input
               type="text"
               value={recipeForm.name}
@@ -818,6 +980,21 @@ const handleClosePinModal = () => {
               required
             />
           </div>
+
+          <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={Boolean(recipeForm.add_to_product_type)}
+              onChange={(e) =>
+                setRecipeForm((prev) => ({
+                  ...prev,
+                  add_to_product_type: e.target.checked,
+                }))
+              }
+              className="h-4 w-4 rounded border-gray-300 text-[#245658] focus:ring-[#245658]"
+            />
+            Add this recipe name to Product Types
+          </label>
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
@@ -842,15 +1019,18 @@ const handleClosePinModal = () => {
                     required
                   >
                     <option value="">Select</option>
-                    {rmTypes.map((rm) => (
+                    {rmTypes.map((rm) => {
+                        const shortText = rm.name.length > 25 ? rm.name.slice(0, 25) + "..." : rm.name;
+                   return (
                       <option key={`recipe-rm-${rm.id || rm.name}`} value={rm.name}>
-                        {rm.name}
+                        {shortText}
                       </option>
-                    ))}
+                    )})}
                   </select>
                 </div>
-                <div className="md:col-span-4">
+                <div className="md:col-span-5">
                   <label className="block text-xs text-black mb-1">Weight (kg)</label>
+                   <div className='flex items-center justify-center gap-2'>
                   <input
                     type="number"
                     step="any"
@@ -860,22 +1040,21 @@ const handleClosePinModal = () => {
                     className="w-full px-3 py-2 rounded border border-gray-300"
                     required
                   />
-                </div>
-                <div className="md:col-span-1">
-                  <button
+                    <button
                     type="button"
                     onClick={() => removeRecipeRow(index)}
-                    className="w-full px-2 py-2 rounded border border-gray-600 text-black text-sm"
+                    className="w-1/4 px-3 py-2 rounded border border-gray-600 text-black text-sm "
                   >
                     X
                   </button>
                 </div>
+                 </div>
               </div>
             ))}
           </div>
 
           {editingRecipeId && recipeForm.created_at && (
-            <div className="absolute bottom-4 right-4 text-xs text-slate-500">
+            <div className="absolute bottom-4 right-4 text-xs text-slate-500 max-w-[120px] sm:max-w-[200px] break-words">          
               Created: {formatDateTimeIST(recipeForm.created_at)}
             </div>
           )}
@@ -895,12 +1074,12 @@ const handleClosePinModal = () => {
         {viewingRecipe && (
           <div className="space-y-4">
             <div className="bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
-              <p className="text-sm font-semibold text-slate-800">{viewingRecipe.name}</p>
+              <p className="text-sm font-semibold text-slate-800  break-words line-clamp-3">{viewingRecipe.name}</p>
               <p className="text-xs text-slate-500 mt-1">
                 Recipe ID: {viewingRecipe.id ?? "—"}
               </p>
               <p className="text-xs text-slate-500 mt-1">
-                Last Modified: {formatDateTimeIST(viewingRecipe.last_modified_at || viewingRecipe.created_at)}
+                Last Modified: {viewingRecipe.last_modified_at ? formatDateTimeIST(viewingRecipe.last_modified_at) : "N/A"}
               </p>
             </div>
             <div>
@@ -914,6 +1093,7 @@ const handleClosePinModal = () => {
                       <tr>
                         <th className="px-3 py-2 text-left border-b border-slate-200">Raw Material</th>
                         <th className="px-3 py-2 text-right border-b border-slate-200">Weight (kg)</th>
+                        <th className="px-3 py-2 text-left border-b border-slate-200">Last Modified</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -921,6 +1101,9 @@ const handleClosePinModal = () => {
                         <tr key={`view-recipe-${viewingRecipe.id || viewingRecipe.name}-${idx}`} className="border-b border-slate-100 last:border-b-0">
                           <td className="px-3 py-2 text-slate-700">{item.rm_name}</td>
                           <td className="px-3 py-2 text-right text-slate-700">{item.quantity}</td>
+                          <td className="px-3 py-2 text-slate-600">
+                            {item.last_modified_at ? formatDateTimeIST(item.last_modified_at) : "N/A"}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -944,7 +1127,7 @@ const handleClosePinModal = () => {
       </Modal>
 
       <Modal open={showEditRmType} onClose={closeEditRmTypeModal} title="Edit Raw Material Type">
-        <form onSubmit={saveRmTypeEdit} className="space-y-4 relative">
+        <form onSubmit={saveRmTypeEdit}  className="space-y-4 relative pb-16 sm:pb-0">
           {rmTypeError && (
             <div className="bg-red-100 text-red-800 px-4 py-3 rounded-lg text-sm border border-red-300">
               {rmTypeError}
@@ -962,8 +1145,8 @@ const handleClosePinModal = () => {
             />
           </div>
           {editingRmType && (
-            <div className="absolute bottom-4 right-4 text-xs text-slate-500">
-              Created: {formatDateTimeIST(editingRmType.created_at)}
+            <div className="absolute bottom-4 right-4 text-xs text-slate-500 max-w-[120px] sm:max-w-[200px] break-words">
+              Created : {formatDateTimeIST(editingRmType.created_at)}
             </div>
           )}
           <div className="flex gap-2 mt-8">
@@ -977,8 +1160,37 @@ const handleClosePinModal = () => {
         </form>
       </Modal>
 
+      <Modal open={showAddProductType} onClose={closeAddProductTypeModal} title="Add Product Type">
+        <form onSubmit={saveProductTypeAdd} className="space-y-4">
+          {productTypeAddError && (
+            <div className="bg-red-100 text-red-800 px-4 py-3 rounded-lg text-sm border border-red-300">
+              {productTypeAddError}
+            </div>
+          )}
+          <div>
+            <label className="block text-sm text-black mb-1">Product Type Name</label>
+            <input
+              type="text"
+              value={newProductType}
+              onChange={(e) => setNewProductType(e.target.value)}
+              className="w-full px-3 py-2 rounded border border-gray-300"
+              placeholder="Enter product type name"
+              required
+            />
+          </div>
+          <div className="flex gap-2">
+            <button type="submit" className="px-4 py-2 rounded bg-[#245658] text-white">
+              Add Product Type
+            </button>
+            <button type="button" onClick={closeAddProductTypeModal} className="px-4 py-2 rounded border border-gray-400">
+              Cancel
+            </button>
+          </div>
+        </form>
+      </Modal>
+
       <Modal open={showEditProductType} onClose={closeEditProductTypeModal} title="Edit Product Type">
-        <form onSubmit={saveProductTypeEdit} className="space-y-4 relative">
+        <form onSubmit={saveProductTypeEdit} className="space-y-4 relative pb-16 md:pb-0">
           {productTypeError && (
             <div className="bg-red-100 text-red-800 px-4 py-3 rounded-lg text-sm border border-red-300">
               {productTypeError}
@@ -997,7 +1209,7 @@ const handleClosePinModal = () => {
           </div>
           {editingProductType && (
             <div className="absolute bottom-4 right-4 text-xs text-slate-500">
-              Last Modified: {formatDateTimeIST(editingProductType.last_modified_at || editingProductType.created_at)}
+              Created : {editingProductType.created_at ? formatDateTimeIST(editingProductType.created_at) : "N/A"}
             </div>
           )}
           <div className="flex gap-2 mt-8">
@@ -1052,5 +1264,6 @@ const handleClosePinModal = () => {
       />
       {pinDialog}
     </div>
+     </div>
   )
 }

@@ -1,12 +1,13 @@
-﻿import re
-from datetime import datetime, timedelta
+# Production batch, HMI, and report routes.
 
+import re
+from datetime import datetime, timedelta
+import math
 from ..fastapi_compat import Blueprint, Response, jsonify, request
 from sqlalchemy import select
 
 from ..common import (
-    DEFAULT_CLIENT_ID,
-    db_session,
+        db_session,
     error,
     json_body,
     parse_datetime,
@@ -15,8 +16,7 @@ from ..common import (
     required,
     serialize_batch,
     serialize_batch_material,
-    serialize_report,
-)
+    serialize_report)
 from ...models.config import ProductType, Recipe
 from ...models.plc import PLCDataSnapshot
 from ...models.production import ProductionBatch, ProductionBatchMaterial, ProductionReport
@@ -30,17 +30,16 @@ from ...services.production_runtime import (
     finalize_batch_runtime_state,
     normalize_batch_count,
     sync_active_batch_progress,
-    try_post_batch_stock,
-)
+    try_post_batch_stock)
 from ...services.stock import (
     add_feed_produced,
     add_rm_consumption,
     calculate_rm_consumption_quantity,
     collect_rm_shortages,
     format_rm_shortage_message,
+    rebuild_feed_stock_ledger,
     rebuild_rm_stock_ledger,
-    resolve_effective_batch_run_count,
-)
+    resolve_effective_batch_run_count)
 from ...utils.export import (
     export_batch_consumption_report_excel,
     export_batch_consumption_report_pdf,
@@ -48,11 +47,27 @@ from ...utils.export import (
     export_batch_report_pdf,
     export_production_report_excel,
     export_production_report_pdf,
-    export_table_to_csv,
-)
+    export_table_to_csv)
 
 production_bp = Blueprint("production", __name__, url_prefix="/api/production")
 
+_DATE_ONLY_INPUT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MIDNIGHT_DATETIME_INPUT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T00:00:00(?:\.0+)?$")
+
+# Detects whether incoming date payload is date-only (no time component).
+
+def _is_date_only_payload(raw_value: object) -> bool:
+    if not isinstance(raw_value, str):
+        return False
+    value = raw_value.strip()
+    if not value:
+        return False
+    return bool(
+        _DATE_ONLY_INPUT_RE.fullmatch(value)
+        or _MIDNIGHT_DATETIME_INPUT_RE.fullmatch(value)
+    )
+
+# Parses and normalizes batch number values with fallback behavior.
 
 def _parse_batch_no(raw_value: object, fallback: str | None = None) -> str:
     if raw_value in (None, ""):
@@ -64,10 +79,12 @@ def _parse_batch_no(raw_value: object, fallback: str | None = None) -> str:
         raise ValueError("batch_no must be 64 characters or fewer")
     return value
 
+# Returns display-friendly batch number string for UI/API.
 
 def _display_batch_no(batch: ProductionBatch) -> str:
     return _parse_batch_no(batch.batch_no, fallback=str(batch.id))
 
+# Computes PLC time window boundaries corresponding to a batch run.
 
 def _resolve_batch_plc_window(batch: ProductionBatch) -> tuple[datetime, datetime]:
     start = batch.hmi_started_at or batch.date or batch.created_at or datetime.utcnow()
@@ -84,6 +101,37 @@ def _resolve_batch_plc_window(batch: ProductionBatch) -> tuple[datetime, datetim
         end = start
     return start, end
 
+# Calculates resolved utilized count value for a production batch.
+
+def _resolved_batch_utilized_count(batch: ProductionBatch) -> float:
+    return resolve_effective_batch_run_count(
+        batch_size=batch.batch_size,
+        hmi_completed_count=batch.hmi_completed_count,
+        hmi_status=batch.hmi_status,
+        rm_shortage_flag=batch.rm_shortage_flag)
+
+# Recomputes and persists total material quantity for a batch.
+
+def _refresh_material_total_quantity(db, *, batch: ProductionBatch) -> None:
+    utilized_count = _resolved_batch_utilized_count(batch)
+    material_rows = (
+        db.execute(
+            select(ProductionBatchMaterial)
+            .where(ProductionBatchMaterial.batch_id == batch.id)
+            .order_by(ProductionBatchMaterial.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    for material in material_rows:
+        if utilized_count > 0:
+            material.total_quantity = calculate_rm_consumption_quantity(
+                material.quantity,
+                utilized_count)
+        else:
+            material.total_quantity = None
+
+# Validates and normalizes production material list payload rows.
 
 def _parse_materials(raw_materials: object) -> list[dict]:
     if not isinstance(raw_materials, list) or len(raw_materials) == 0:
@@ -108,6 +156,7 @@ def _parse_materials(raw_materials: object) -> list[dict]:
         parsed.append({"rm_name": rm_name, "quantity": quantity})
     return parsed
 
+# Parses output bag metrics and validates required output fields.
 
 def _parse_bag_output_fields(payload: dict, *, required_fields: bool) -> tuple[float, float, float]:
     num_bags = parse_float(payload, "num_bags", required_field=required_fields)
@@ -125,6 +174,7 @@ def _parse_bag_output_fields(payload: dict, *, required_fields: bool) -> tuple[f
         raise ValueError("output must be greater than 0")
     return num_bags, weight_per_bag, output_value
 
+# Parses HMI batch count input into valid integer.
 
 def _parse_hmi_batch_count(raw_value: object) -> int:
     try:
@@ -135,6 +185,7 @@ def _parse_hmi_batch_count(raw_value: object) -> int:
         raise ValueError("batch_count must be greater than 0")
     return value
 
+# Parses HMI batch duration input into valid numeric duration.
 
 def _parse_hmi_duration(raw_value: object) -> float:
     try:
@@ -145,38 +196,35 @@ def _parse_hmi_duration(raw_value: object) -> float:
         raise ValueError("duration_per_count_seconds must be greater than 0")
     return value
 
+# Checks whether a batch number already exists under configured scope constraints.
 
 def _batch_no_exists(
     db,
     batch_no: str,
     *,
-    exclude_batch_id: int | None = None,
-) -> bool:
+    exclude_batch_id: int | None = None) -> bool:
     normalized = str(batch_no or "").strip()
     if not normalized:
         return False
 
     query = select(ProductionBatch.id).where(
-        ProductionBatch.client_id == DEFAULT_CLIENT_ID,
         ProductionBatch.batch_no.is_not(None),
-        ProductionBatch.batch_no.ilike(normalized),
-    )
+        ProductionBatch.batch_no.ilike(normalized))
     if exclude_batch_id is not None:
         query = query.where(ProductionBatch.id != exclude_batch_id)
     return db.execute(query.limit(1)).first() is not None
 
+# Generates the next suggested batch number for HMI flow.
 
 def _suggest_next_hmi_batch_no(db) -> str:
     pattern = re.compile(r"^BATCH(\d+)$", re.IGNORECASE)
     rows = db.execute(
         select(ProductionBatch.batch_no).where(
-            ProductionBatch.client_id == DEFAULT_CLIENT_ID,
-            ProductionBatch.batch_no.is_not(None),
-        )
+            ProductionBatch.batch_no.is_not(None))
     ).all()
 
     max_sequence = 0
-    for (batch_no,) in rows:
+    for (batch_no) in rows:
         if not isinstance(batch_no, str):
             continue
         match = pattern.match(batch_no.strip())
@@ -190,6 +238,7 @@ def _suggest_next_hmi_batch_no(db) -> str:
             max_sequence = seq
     return f"BATCH{max_sequence + 1:05d}"
 
+# Normalizes list filter tokens for period/product filtering.
 
 def _normalize_filter_token(raw_value: str | None) -> str | None:
     value = str(raw_value or "").strip()
@@ -199,6 +248,7 @@ def _normalize_filter_token(raw_value: str | None) -> str | None:
         return None
     return value
 
+# Parses recipe id from HMI payload with validation.
 
 def _parse_hmi_recipe_id(raw_value: object) -> int:
     try:
@@ -209,19 +259,51 @@ def _parse_hmi_recipe_id(raw_value: object) -> int:
         raise ValueError("recipe_id must be greater than 0")
     return value
 
+# Resolves product type input to canonical product type name.
+
+def _resolve_product_type_name(db, raw_value: object, *, required_field: bool) -> str:
+    product_name = str(raw_value or "").strip()
+    if not product_name:
+        if required_field:
+            raise ValueError("product_name is required")
+        return ""
+    product_type = (
+        db.execute(select(ProductType).where(ProductType.name == product_name))
+        .scalars()
+        .one_or_none()
+    )
+    if product_type is None:
+        raise ValueError("Invalid product_name. Select a valid product type.")
+    return str(product_type.name or "").strip()
+
+# Resolve HMI recipe selection and return the recipe type/name to persist.
+# If recipe master row is missing, still allow batch start using a stable
+# fallback product name so HMI remains single-direction and resilient.
 
 def _resolve_hmi_recipe_identity(db, recipe_id: int) -> tuple[Recipe | None, str]:
-    """
-    Resolve HMI recipe selection.
-    If recipe master row is missing, still allow batch start using a stable
-    fallback product name so HMI remains single-direction and resilient.
-    """
     recipe = db.get(Recipe, recipe_id)
     if recipe is not None:
         recipe_name = str(recipe.name or "").strip()
         return recipe, (recipe_name or f"Recipe {recipe_id}")
     return None, f"Recipe {recipe_id}"
 
+# Finds canonical product type name that matches a candidate string.
+
+def _resolve_matching_product_type_name(db, candidate_name: str) -> str:
+    normalized_name = str(candidate_name or "").strip()
+    if not normalized_name:
+        return ""
+
+    product_type = (
+        db.execute(select(ProductType).where(ProductType.name == normalized_name))
+        .scalars()
+        .one_or_none()
+    )
+    if product_type is None:
+        return ""
+    return str(product_type.name or "").strip()
+
+# Converts recipe materials into batch material payload structure.
 
 def _collect_recipe_material_payload(recipe: Recipe | None) -> list[dict]:
     if recipe is None:
@@ -241,12 +323,14 @@ def _collect_recipe_material_payload(recipe: Recipe | None) -> list[dict]:
         rows.append({"rm_name": rm_name, "quantity": qty})
     return rows
 
+# Returns next suggested HMI batch number.
 
 @production_bp.get("/hmi/batch-no/suggest")
 def suggest_hmi_batch_no():
     with db_session() as db:
         return jsonify({"batch_no": _suggest_next_hmi_batch_no(db)})
 
+# Lists production batches with current filters/sorting behavior.
 
 @production_bp.get("/batches")
 def list_batches():
@@ -263,7 +347,7 @@ def list_batches():
         sync_active_batch_progress(db, machine_state=machine_state)
         active_batch_id = machine_state.active_batch_id
 
-        query = select(ProductionBatch).where(ProductionBatch.client_id == DEFAULT_CLIENT_ID)
+        query = select(ProductionBatch)
         if date:
             start = date.replace(hour=0, minute=0, second=0, microsecond=0)
             end = start + timedelta(days=1)
@@ -289,11 +373,11 @@ def list_batches():
                 serialize_batch(
                     batch,
                     has_report=has_report,
-                    is_active=batch.id == active_batch_id,
-                )
+                    is_active=batch.id == active_batch_id)
             )
     return jsonify(out)
 
+# Lists batches filtered by period and product.
 
 @production_bp.get("/batches/filtered/<period>/<path:product_name>")
 def list_batches_by_period(period: str, product_name: str):
@@ -301,8 +385,7 @@ def list_batches_by_period(period: str, product_name: str):
         from_date, to_date = resolve_period_range(
             period,
             from_date_raw=request.args.get("from_date"),
-            to_date_raw=request.args.get("to_date"),
-        )
+            to_date_raw=request.args.get("to_date"))
     except ValueError as exc:
         return error(str(exc))
     normalized_product_name = _normalize_filter_token(product_name)
@@ -312,7 +395,7 @@ def list_batches_by_period(period: str, product_name: str):
         sync_active_batch_progress(db, machine_state=machine_state)
         active_batch_id = machine_state.active_batch_id
 
-        query = select(ProductionBatch).where(ProductionBatch.client_id == DEFAULT_CLIENT_ID)
+        query = select(ProductionBatch)
         query = query.where(ProductionBatch.date >= from_date)
         query = query.where(ProductionBatch.date <= to_date)
         if normalized_product_name:
@@ -332,11 +415,11 @@ def list_batches_by_period(period: str, product_name: str):
                 serialize_batch(
                     batch,
                     has_report=has_report,
-                    is_active=batch.id == active_batch_id,
-                )
+                    is_active=batch.id == active_batch_id)
             )
     return jsonify(out)
 
+# Returns aggregate production summary for period/product filters.
 
 @production_bp.get("/batches/summary/<period>/<path:product_name>")
 def summarize_batches_by_period(period: str, product_name: str):
@@ -344,8 +427,7 @@ def summarize_batches_by_period(period: str, product_name: str):
         from_date, to_date = resolve_period_range(
             period,
             from_date_raw=request.args.get("from_date"),
-            to_date_raw=request.args.get("to_date"),
-        )
+            to_date_raw=request.args.get("to_date"))
     except ValueError as exc:
         return error(str(exc))
     normalized_product_name = _normalize_filter_token(product_name)
@@ -354,7 +436,7 @@ def summarize_batches_by_period(period: str, product_name: str):
         machine_state = get_or_create_machine_state(db)
         sync_active_batch_progress(db, machine_state=machine_state)
 
-        query = select(ProductionBatch).where(ProductionBatch.client_id == DEFAULT_CLIENT_ID)
+        query = select(ProductionBatch)
         query = query.where(ProductionBatch.date >= from_date)
         query = query.where(ProductionBatch.date <= to_date)
         if normalized_product_name:
@@ -375,6 +457,7 @@ def summarize_batches_by_period(period: str, product_name: str):
         }
     )
 
+# Creates a standard production batch and related material mappings.
 
 @production_bp.post("/batches")
 def create_batch():
@@ -387,13 +470,11 @@ def create_batch():
         batch_size_value = parse_float(payload, "batch_size", required_field=True)
         if batch_size_value is None or batch_size_value <= 0:
             raise ValueError("batch_size must be greater than 0")
-        recipe_id_raw = payload.get("recipe_id")
-        recipe_id = int(recipe_id_raw) if recipe_id_raw not in (None, "") else None
+        recipe_id = _parse_hmi_recipe_id(required(payload, "recipe_id"))
         batch_no_value = _parse_batch_no(payload.get("batch_no"))
         num_bags_value, weight_per_bag_value, output_value = _parse_bag_output_fields(
             payload,
-            required_fields=True,
-        )
+            required_fields=True)
     except (ValueError, TypeError) as exc:
         return error(str(exc))
 
@@ -401,35 +482,27 @@ def create_batch():
         if batch_no_value and _batch_no_exists(db, batch_no_value):
             return error("batch_no already exists. Use a unique batch number.")
 
-        recipe = None
-        if recipe_id is not None:
-            recipe = db.get(Recipe, recipe_id)
-            if not recipe:
-                return error("Recipe not found")
-            # Keep canonical recipe naming in production/stock ledgers.
-            product_name = recipe.name
-        else:
-            recipe = (
-                db.execute(select(Recipe).where(Recipe.name.ilike(product_name)))
-                .scalars()
-                .one_or_none()
-            )
-            if not recipe:
-                return error("Invalid product type. Select a valid recipe.")
-            recipe_id = recipe.id
-            product_name = recipe.name
+        selected_recipe = db.get(Recipe, recipe_id)
+        if selected_recipe is None:
+            return error("Recipe not found")
+        recipe_type = str(selected_recipe.name or "").strip() or f"Recipe {recipe_id}"
+
+        try:
+            product_name = _resolve_product_type_name(db, product_name, required_field=True)
+        except ValueError as exc:
+            return error(str(exc))
 
         try:
             raw_materials_payload = payload.get("materials")
             if isinstance(raw_materials_payload, list) and len(raw_materials_payload) > 0:
                 materials = _parse_materials(raw_materials_payload)
-            elif recipe and recipe.materials:
+            elif selected_recipe and selected_recipe.materials:
                 materials = [
                     {
                         "rm_name": item.rm_name,
                         "quantity": float(item.quantity),
                     }
-                    for item in recipe.materials
+                    for item in selected_recipe.materials
                 ]
             else:
                 raise ValueError("materials is required and must be a non-empty list")
@@ -438,18 +511,15 @@ def create_batch():
 
         shortages = collect_rm_shortages(
             db=db,
-            client_id=DEFAULT_CLIENT_ID,
             date=date,
             materials=materials,
-            batch_run_count=batch_size_value,
-        )
+            batch_run_count=batch_size_value)
         if shortages:
             return error(format_rm_shortage_message(shortages))
 
         try:
             now = datetime.utcnow()
             batch = ProductionBatch(
-                client_id=DEFAULT_CLIENT_ID,
                 batch_no=batch_no_value or None,
                 date=date,
                 product_name=product_name,
@@ -459,7 +529,7 @@ def create_batch():
                 num_bags=num_bags_value,
                 weight_per_bag=weight_per_bag_value,
                 output=output_value,
-                recipe_id=recipe_id,
+                recipe_type=recipe_type,
                 hmi_duration_seconds=None,
                 hmi_completed_count=normalize_batch_count(batch_size_value),
                 hmi_status=RUN_STATUS_COMPLETED,
@@ -468,8 +538,7 @@ def create_batch():
                 stock_posted=False,
                 rm_shortage_flag=False,
                 rm_shortage_detail=None,
-                last_modified_at=now,
-            )
+                last_modified_at=now)
         except ValueError as exc:
             return error(str(exc))
 
@@ -486,30 +555,25 @@ def create_batch():
                     batch_id=batch.id,
                     rm_name=material["rm_name"],
                     quantity=material["quantity"],
-                )
+                    total_quantity=None)
                 db.add(row)
                 material_rows.append(row)
                 required_quantity = calculate_rm_consumption_quantity(
                     material["quantity"],
-                    batch_size_value,
-                )
+                    batch_size_value)
                 add_rm_consumption(
                     db=db,
-                    client_id=DEFAULT_CLIENT_ID,
                     rm_name=material["rm_name"],
                     quantity=required_quantity,
-                    date=batch.date,
-                )
+                    date=batch.date)
             db.flush()
 
             add_feed_produced(
                 db=db,
-                client_id=DEFAULT_CLIENT_ID,
                 feed_type=batch.product_name,
                 quantity=batch.output,
                 date=batch.date,
-                weight_per_bag=batch.weight_per_bag,
-            )
+                weight_per_bag=batch.weight_per_bag)
             batch.stock_posted = True
 
             response = serialize_batch(batch, has_report=False, is_active=False)
@@ -518,6 +582,7 @@ def create_batch():
         except ValueError as exc:
             return error(str(exc))
 
+# Creates a production batch from HMI-oriented payload workflow.
 
 @production_bp.post("/hmi/batches")
 def create_hmi_batch():
@@ -528,6 +593,7 @@ def create_hmi_batch():
         duration_seconds = _parse_hmi_duration(required(payload, "duration_per_count_seconds"))
         recipe_id_raw = payload.get("recipe_id")
         recipe_id = _parse_hmi_recipe_id(recipe_id_raw) if recipe_id_raw not in (None, "") else None
+        requested_product_name = str(payload.get("product_name") or "").strip()
         date = parse_datetime(payload.get("date"), "date") or datetime.utcnow()
     except (ValueError, TypeError) as exc:
         return error(str(exc))
@@ -536,8 +602,18 @@ def create_hmi_batch():
         with db_session() as db:
             recipe = None
             product_name = ""
+            recipe_type = ""
             if recipe_id is not None:
-                recipe, product_name = _resolve_hmi_recipe_identity(db, recipe_id)
+                recipe, recipe_type = _resolve_hmi_recipe_identity(db, recipe_id)
+                product_name = _resolve_matching_product_type_name(db, recipe_type)
+            if requested_product_name:
+                try:
+                    product_name = _resolve_product_type_name(
+                        db,
+                        requested_product_name,
+                        required_field=True)
+                except ValueError as exc:
+                    return error(str(exc))
 
             batch_no = batch_no_input or _suggest_next_hmi_batch_no(db)
             if _batch_no_exists(db, batch_no):
@@ -545,7 +621,6 @@ def create_hmi_batch():
                     f"batch_no already exists. Try {_suggest_next_hmi_batch_no(db)}."
                 )
             batch = ProductionBatch(
-                client_id=DEFAULT_CLIENT_ID,
                 batch_no=batch_no,
                 date=date,
                 product_name=product_name,
@@ -555,7 +630,7 @@ def create_hmi_batch():
                 num_bags=None,
                 weight_per_bag=None,
                 output=0,
-                recipe_id=recipe_id,
+                recipe_type=recipe_type or None,
                 hmi_duration_seconds=duration_seconds,
                 hmi_completed_count=0,
                 hmi_status=RUN_STATUS_PENDING,
@@ -564,8 +639,7 @@ def create_hmi_batch():
                 stock_posted=False,
                 rm_shortage_flag=False,
                 rm_shortage_detail=None,
-                last_modified_at=datetime.utcnow(),
-            )
+                last_modified_at=datetime.utcnow())
             db.add(batch)
             db.flush()
             material_rows = []
@@ -574,7 +648,7 @@ def create_hmi_batch():
                     batch_id=batch.id,
                     rm_name=material["rm_name"],
                     quantity=material["quantity"],
-                )
+                    total_quantity=None)
                 db.add(row)
                 material_rows.append(row)
             db.flush()
@@ -584,6 +658,7 @@ def create_hmi_batch():
     except Exception as exc:
         return error(f"Unable to create HMI batch: {str(exc)}", 500)
 
+# Starts selected HMI batch and transitions machine/runtime state.
 
 @production_bp.post("/hmi/start-batch")
 def start_hmi_batch():
@@ -593,6 +668,7 @@ def start_hmi_batch():
         batch_count = _parse_hmi_batch_count(required(payload, "batch_count"))
         duration_seconds = _parse_hmi_duration(required(payload, "duration_per_count_seconds"))
         recipe_id = _parse_hmi_recipe_id(required(payload, "recipe_id"))
+        requested_product_name = str(payload.get("product_name") or "").strip()
         date = parse_datetime(payload.get("date"), "date") or datetime.utcnow()
     except (ValueError, TypeError) as exc:
         return error(str(exc))
@@ -607,15 +683,22 @@ def start_hmi_batch():
             if machine_state.active_batch_id is not None:
                 return error("A batch is already running. Stop it before starting a new batch.")
 
-            recipe, product_name = _resolve_hmi_recipe_identity(db, recipe_id)
+            recipe, recipe_type = _resolve_hmi_recipe_identity(db, recipe_id)
+            product_name = _resolve_matching_product_type_name(db, recipe_type)
+            if requested_product_name:
+                try:
+                    product_name = _resolve_product_type_name(
+                        db,
+                        requested_product_name,
+                        required_field=True)
+                except ValueError as exc:
+                    return error(str(exc))
             recipe_materials = _collect_recipe_material_payload(recipe)
             projected_shortages = collect_rm_shortages(
                 db=db,
-                client_id=DEFAULT_CLIENT_ID,
                 date=date,
                 materials=recipe_materials,
-                batch_run_count=batch_count,
-            )
+                batch_run_count=batch_count)
             projected_shortage_detail = None
             if projected_shortages:
                 projected_shortage_detail = format_rm_shortage_message(
@@ -623,8 +706,7 @@ def start_hmi_batch():
                     heading=(
                         "Batch is running but projected raw material is insufficient "
                         f"for assigned count ({batch_count})"
-                    ),
-                )
+                    ))
 
             batch_no = batch_no_input or _suggest_next_hmi_batch_no(db)
             if _batch_no_exists(db, batch_no):
@@ -634,7 +716,6 @@ def start_hmi_batch():
 
             now = datetime.utcnow()
             batch = ProductionBatch(
-                client_id=DEFAULT_CLIENT_ID,
                 batch_no=batch_no,
                 date=date,
                 product_name=product_name,
@@ -644,7 +725,7 @@ def start_hmi_batch():
                 num_bags=None,
                 weight_per_bag=None,
                 output=0,
-                recipe_id=recipe_id,
+                recipe_type=recipe_type,
                 hmi_duration_seconds=duration_seconds,
                 hmi_completed_count=0,
                 hmi_status=RUN_STATUS_RUNNING,
@@ -653,8 +734,7 @@ def start_hmi_batch():
                 stock_posted=False,
                 rm_shortage_flag=bool(projected_shortage_detail),
                 rm_shortage_detail=projected_shortage_detail,
-                last_modified_at=now,
-            )
+                last_modified_at=now)
             db.add(batch)
             db.flush()
 
@@ -664,7 +744,7 @@ def start_hmi_batch():
                     batch_id=batch.id,
                     rm_name=material["rm_name"],
                     quantity=material["quantity"],
-                )
+                    total_quantity=None)
                 db.add(row)
                 material_rows.append(row)
 
@@ -678,6 +758,7 @@ def start_hmi_batch():
     except Exception as exc:
         return error(f"Unable to start HMI batch: {str(exc)}", 500)
 
+# Stops the currently active HMI batch and updates runtime status.
 
 @production_bp.post("/hmi/stop-active-batch")
 def stop_hmi_active_batch():
@@ -712,6 +793,7 @@ def stop_hmi_active_batch():
         )
         return jsonify(serialize_batch(batch, has_report=has_report, is_active=False))
 
+# Marks a batch complete with eligibility and quantity checks.
 
 @production_bp.post("/batches/<int:batch_id>/mark-complete")
 def mark_batch_complete(batch_id: int):
@@ -722,9 +804,7 @@ def mark_batch_complete(batch_id: int):
         batch = (
             db.execute(
                 select(ProductionBatch).where(
-                    ProductionBatch.id == batch_id,
-                    ProductionBatch.client_id == DEFAULT_CLIENT_ID,
-                )
+                    ProductionBatch.id == batch_id)
             )
             .scalars()
             .one_or_none()
@@ -739,9 +819,7 @@ def mark_batch_complete(batch_id: int):
         if status in {RUN_STATUS_PENDING, RUN_STATUS_STOPPED}:
             eligible, detail = evaluate_mark_complete_eligibility(
                 db=db,
-                batch=batch,
-                client_id=DEFAULT_CLIENT_ID,
-            )
+                batch=batch)
             if not eligible:
                 batch.rm_shortage_flag = True
                 batch.rm_shortage_detail = detail
@@ -765,11 +843,10 @@ def mark_batch_complete(batch_id: int):
 
         warning_detail = finalize_batch_runtime_state(
             db=db,
-            batch=batch,
-            client_id=DEFAULT_CLIENT_ID,
-        )
+            batch=batch)
 
-        try_post_batch_stock(db, batch=batch, client_id=DEFAULT_CLIENT_ID)
+        try_post_batch_stock(db, batch=batch)
+        _refresh_material_total_quantity(db, batch=batch)
         has_report = (
             db.execute(select(ProductionReport).where(ProductionReport.batch_id == batch.id))
             .scalars()
@@ -781,8 +858,7 @@ def mark_batch_complete(batch_id: int):
             "batch": serialize_batch(
                 batch,
                 has_report=has_report,
-                is_active=batch.id == machine_state.active_batch_id,
-            )
+                is_active=batch.id == machine_state.active_batch_id)
         }
         if warning_detail:
             response_payload["warning"] = (
@@ -791,6 +867,7 @@ def mark_batch_complete(batch_id: int):
             )
         return jsonify(response_payload)
 
+# Returns whether a batch can be marked complete and why.
 
 @production_bp.get("/batches/<int:batch_id>/mark-complete-eligibility")
 def get_mark_complete_eligibility(batch_id: int):
@@ -801,9 +878,7 @@ def get_mark_complete_eligibility(batch_id: int):
         batch = (
             db.execute(
                 select(ProductionBatch).where(
-                    ProductionBatch.id == batch_id,
-                    ProductionBatch.client_id == DEFAULT_CLIENT_ID,
-                )
+                    ProductionBatch.id == batch_id)
             )
             .scalars()
             .one_or_none()
@@ -830,11 +905,10 @@ def get_mark_complete_eligibility(batch_id: int):
 
         eligible, detail = evaluate_mark_complete_eligibility(
             db=db,
-            batch=batch,
-            client_id=DEFAULT_CLIENT_ID,
-        )
+            batch=batch)
         return jsonify({"allowed": eligible, "detail": detail})
 
+# Returns full details for one production batch.
 
 @production_bp.get("/batches/<int:batch_id>")
 def get_batch(batch_id: int):
@@ -844,9 +918,7 @@ def get_batch(batch_id: int):
         batch = (
             db.execute(
                 select(ProductionBatch).where(
-                    ProductionBatch.id == batch_id,
-                    ProductionBatch.client_id == DEFAULT_CLIENT_ID,
-                )
+                    ProductionBatch.id == batch_id)
             )
             .scalars()
             .one_or_none()
@@ -864,8 +936,7 @@ def get_batch(batch_id: int):
                 "batch": serialize_batch(
                     batch,
                     has_report=report is not None,
-                    is_active=batch.id == machine_state.active_batch_id,
-                ),
+                    is_active=batch.id == machine_state.active_batch_id),
                 "report": serialize_report(report),
                 "materials": [
                     serialize_batch_material(row)
@@ -880,6 +951,7 @@ def get_batch(batch_id: int):
             }
         )
 
+# Updates editable batch detail fields and dependent values.
 
 @production_bp.put("/batches/<int:batch_id>/details")
 def update_batch_details(batch_id: int):
@@ -893,9 +965,7 @@ def update_batch_details(batch_id: int):
             batch = (
                 db.execute(
                     select(ProductionBatch).where(
-                        ProductionBatch.id == batch_id,
-                        ProductionBatch.client_id == DEFAULT_CLIENT_ID,
-                    )
+                        ProductionBatch.id == batch_id)
                 )
                 .scalars()
                 .one_or_none()
@@ -905,17 +975,25 @@ def update_batch_details(batch_id: int):
 
             batch_updated = False
             rm_stock_rebuild_required = False
+            feed_stock_rebuild_required = False
 
             if "date" in payload:
                 try:
-                    parsed_date = parse_datetime(payload.get("date"), "date")
+                    raw_date = payload.get("date")
+                    parsed_date = parse_datetime(raw_date, "date")
                 except ValueError as exc:
                     return error(str(exc))
                 if parsed_date is None:
                     return error("date is required")
+                # Date-only edits from UI should keep the original UTC time-of-day.
+                if _is_date_only_payload(raw_date) and batch.date is not None:
+                    parsed_date = datetime.combine(
+                        parsed_date.date(),
+                        batch.date.time())
                 batch.date = parsed_date
                 batch_updated = True
                 rm_stock_rebuild_required = True
+                feed_stock_rebuild_required = bool(batch.stock_posted)
 
             if "batch_no" in payload:
                 try:
@@ -930,22 +1008,30 @@ def update_batch_details(batch_id: int):
             selected_recipe_materials: list[dict] | None = None
             if "product_name" in payload:
                 product_name = str(payload.get("product_name") or "").strip()
-                if product_name:
-                    product_type_exists = (
-                        db.execute(select(ProductType).where(ProductType.name.ilike(product_name)))
-                        .scalars()
-                        .one_or_none()
-                    )
-                    if not product_type_exists:
-                        return error("Invalid product_name. Select a valid product type.")
-                    selected_recipe = (
-                        db.execute(select(Recipe).where(Recipe.name.ilike(product_name)))
-                        .scalars()
-                        .one_or_none()
-                    )
-                    if not selected_recipe:
-                        return error("Recipe not found for selected product.")
-                    batch.recipe_id = selected_recipe.id
+                try:
+                    product_name = _resolve_product_type_name(
+                        db,
+                        product_name,
+                        required_field=True)
+                except ValueError as exc:
+                    return error(str(exc))
+                batch.product_name = product_name
+                batch_updated = True
+                feed_stock_rebuild_required = bool(batch.stock_posted)
+
+            if "recipe_id" in payload:
+                recipe_id_raw = payload.get("recipe_id")
+                if recipe_id_raw in (None, ""):
+                    batch.recipe_type = None
+                else:
+                    try:
+                        recipe_id = _parse_hmi_recipe_id(recipe_id_raw)
+                    except ValueError as exc:
+                        return error(str(exc))
+                    selected_recipe = db.get(Recipe, recipe_id)
+                    if selected_recipe is None:
+                        return error("Recipe not found")
+                    batch.recipe_type = str(selected_recipe.name or "").strip() or f"Recipe {selected_recipe.id}"
                     selected_recipe_materials = [
                         {
                             "rm_name": item.rm_name,
@@ -953,9 +1039,6 @@ def update_batch_details(batch_id: int):
                         }
                         for item in selected_recipe.materials
                     ]
-                else:
-                    batch.recipe_id = None
-                batch.product_name = product_name
                 batch_updated = True
 
             parsed_materials: list[dict] | None = None
@@ -1013,6 +1096,7 @@ def update_batch_details(batch_id: int):
                 batch.weight_per_bag = candidate_weight_per_bag
                 batch.output = candidate_num_bags * candidate_weight_per_bag
                 batch_updated = True
+                feed_stock_rebuild_required = bool(batch.stock_posted)
 
             if "output" in payload:
                 if "num_bags" not in payload and "weight_per_bag" not in payload:
@@ -1024,6 +1108,7 @@ def update_batch_details(batch_id: int):
                         return error("output must be greater than 0")
                     batch.output = output_value
                     batch_updated = True
+                    feed_stock_rebuild_required = bool(batch.stock_posted)
 
             if parsed_materials is not None:
                 existing_rows = (
@@ -1040,19 +1125,22 @@ def update_batch_details(batch_id: int):
                             batch_id=batch.id,
                             rm_name=item["rm_name"],
                             quantity=item["quantity"],
-                        )
+                            total_quantity=None)
                     )
                 db.flush()
                 rm_stock_rebuild_required = True
                 batch_updated = True
 
             if rm_stock_rebuild_required:
-                rebuild_rm_stock_ledger(db=db, client_id=DEFAULT_CLIENT_ID)
+                rebuild_rm_stock_ledger(db=db)
 
             if batch_updated:
                 batch.last_modified_at = datetime.utcnow()
 
-            try_post_batch_stock(db, batch=batch, client_id=DEFAULT_CLIENT_ID)
+            try_post_batch_stock(db, batch=batch)
+            if feed_stock_rebuild_required:
+                rebuild_feed_stock_ledger(db=db)
+            _refresh_material_total_quantity(db, batch=batch)
             machine_state = get_or_create_machine_state(db)
             has_report = (
                 db.execute(select(ProductionReport).where(ProductionReport.batch_id == batch.id))
@@ -1066,8 +1154,7 @@ def update_batch_details(batch_id: int):
                     "batch": serialize_batch(
                         batch,
                         has_report=has_report,
-                        is_active=batch.id == machine_state.active_batch_id,
-                    ),
+                        is_active=batch.id == machine_state.active_batch_id),
                     "materials": [
                         serialize_batch_material(row)
                         for row in db.execute(
@@ -1084,6 +1171,7 @@ def update_batch_details(batch_id: int):
     except ValueError as exc:
         return error(str(exc))
 
+# Submits/records production report data for a batch or period.
 
 @production_bp.post("/report")
 def submit_production_report():
@@ -1135,6 +1223,7 @@ def submit_production_report():
     except ValueError as exc:
         return error(str(exc))
 
+# Returns material consumption report data for analysis/export.
 
 @production_bp.get("/consumption")
 def consumption_report():
@@ -1147,7 +1236,7 @@ def consumption_report():
     with db_session() as db:
         query = (
             select(ProductionBatch)
-            .where(ProductionBatch.client_id == DEFAULT_CLIENT_ID)
+            
             .order_by(ProductionBatch.date.desc(), ProductionBatch.id.desc())
         )
         if from_date:
@@ -1162,8 +1251,7 @@ def consumption_report():
                 batch_size=batch.batch_size,
                 hmi_completed_count=batch.hmi_completed_count,
                 hmi_status=batch.hmi_status,
-                rm_shortage_flag=batch.rm_shortage_flag,
-            )
+                rm_shortage_flag=batch.rm_shortage_flag)
             batch_rows = (
                 db.execute(
                     select(ProductionBatchMaterial)
@@ -1178,7 +1266,12 @@ def consumption_report():
             batch_total_weight = 0.0
             for material in batch_rows:
                 weight_per_batch = float(material.quantity or 0)
-                total_weight = weight_per_batch * total_batch
+                if material.total_quantity is not None:
+                    total_weight = float(material.total_quantity or 0)
+                else:
+                    total_weight = calculate_rm_consumption_quantity(
+                        weight_per_batch,
+                        total_batch)
                 batch_weight_per_run += weight_per_batch
                 batch_total_weight += total_weight
                 rows.append(
@@ -1211,6 +1304,7 @@ def consumption_report():
 
     return jsonify(rows)
 
+# Exports production list/report data in downloadable format.
 
 @production_bp.get("/download")
 def download_production():
@@ -1225,7 +1319,7 @@ def download_production():
         query = (
             select(ProductionBatch, ProductionReport)
             .outerjoin(ProductionReport, ProductionBatch.id == ProductionReport.batch_id)
-            .where(ProductionBatch.client_id == DEFAULT_CLIENT_ID)
+            
             .order_by(ProductionBatch.date.desc())
         )
         if from_date:
@@ -1244,15 +1338,6 @@ def download_production():
         "No. of Bags",
         "Weight/Bag",
         "Output",
-        "Protein",
-        "Fat",
-        "Fiber",
-        "Ash",
-        "Ca",
-        "P",
-        "Salt",
-        "Hardness",
-        "Fines",
     ]
     data_rows = [
         (
@@ -1264,17 +1349,7 @@ def download_production():
             batch.water or "",
             batch.num_bags or "",
             batch.weight_per_bag or "",
-            batch.output,
-            report.protein if report else "",
-            report.fat if report else "",
-            report.fiber if report else "",
-            report.ash if report else "",
-            report.calcium if report else "",
-            report.phosphorus if report else "",
-            report.salt if report else "",
-            report.hardness if report else "",
-            report.fines if report else "",
-        )
+            batch.output)
         for batch, report in rows
     ]
 
@@ -1282,20 +1357,20 @@ def download_production():
         return Response(
             export_table_to_csv(headers, data_rows),
             mimetype="text/csv",
-            headers={"Content-Disposition": "attachment; filename=production_report.csv"},
-        )
+            headers={"Content-Disposition": "attachment; filename=production_report.csv"})
     if file_format in ("excel", "xlsx"):
         return Response(
             export_production_report_excel(headers, data_rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=production_report.xlsx"},
-        )
+            headers={"Content-Disposition": "attachment; filename=production_report.xlsx"})
     return Response(
         export_production_report_pdf(headers, data_rows),
         mimetype="application/pdf",
-        headers={"Content-Disposition": "attachment; filename=production_report.pdf"},
-    )
+        headers={"Content-Disposition": "attachment; filename=production_report.pdf"})
+
 # Download single batch report
+# Exports a single batch production report.
+
 @production_bp.get("/<int:batch_id>/download")
 def download_single_batch(batch_id: int):
     file_format = request.args.get("format", "pdf").lower()
@@ -1306,12 +1381,9 @@ def download_single_batch(batch_id: int):
                 select(ProductionBatch, ProductionReport)
                 .outerjoin(
                     ProductionReport,
-                    ProductionBatch.id == ProductionReport.batch_id,
-                )
+                    ProductionBatch.id == ProductionReport.batch_id)
                 .where(
-                    ProductionBatch.id == batch_id,
-                    ProductionBatch.client_id == DEFAULT_CLIENT_ID,
-                )
+                    ProductionBatch.id == batch_id)
             )
             .first()
         )
@@ -1321,8 +1393,10 @@ def download_single_batch(batch_id: int):
 
         batch, report = row
         batch_start, batch_end = _resolve_batch_plc_window(batch)
+
         window_seconds = max(1, int((batch_end - batch_start).total_seconds()))
         window_minutes = max(1, int((window_seconds + 59) // 60))
+
         ensure_plc_live_data(db, minutes=max(60, window_minutes))
 
         if not report:
@@ -1337,18 +1411,36 @@ def download_single_batch(batch_id: int):
             .scalars()
             .all()
         )
+        total_batch = _resolved_batch_utilized_count(batch)
+        for material in materials:
+            if material.total_quantity is not None:
+                display_quantity = float(material.total_quantity or 0)
+            else:
+                display_quantity = calculate_rm_consumption_quantity(
+                    material.quantity,
+                    total_batch)
+            setattr(material, "_report_quantity", display_quantity)
+
         plc_rows = (
             db.execute(
                 select(PLCDataSnapshot)
                 .where(
                     PLCDataSnapshot.recorded_at >= batch_start,
-                    PLCDataSnapshot.recorded_at <= batch_end,
-                )
+                    PLCDataSnapshot.recorded_at <= batch_end)
                 .order_by(PLCDataSnapshot.recorded_at.asc())
             )
             .scalars()
             .all()
         )
+
+        # ? ?? Dynamic Sampling using CEIL
+        TARGET_ROWS = 500
+
+        total_rows = len(plc_rows)
+
+        if total_rows > TARGET_ROWS:
+            step = math.ceil(total_rows / TARGET_ROWS)
+            plc_rows = plc_rows[::step]
 
     headers = [
         "Date",
@@ -1389,8 +1481,7 @@ def download_single_batch(batch_id: int):
         report.phosphorus or "",
         report.salt or "",
         report.hardness or "",
-        report.fines or "",
-    )]
+        report.fines or "")]
 
     filename = f"batch_{batch_id}_report"
 
@@ -1398,29 +1489,26 @@ def download_single_batch(batch_id: int):
         return Response(
             export_table_to_csv(headers, data_rows),
             mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}.csv"},
-        )
+            headers={"Content-Disposition": f"attachment; filename={filename}.csv"})
 
     if file_format in ("excel", "xlsx"):
         return Response(
             export_batch_report_excel(headers, data_rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"},
-        )
+            headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"})
 
     return Response(
         export_batch_report_pdf(
             batch,
             report,
             materials,
-            plc_rows=plc_rows,
+            plc_rows=plc_rows,  # ? Now optimized
             plc_start=batch_start,
-            plc_end=batch_end,
-        ),
+            plc_end=batch_end),
         mimetype="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename={filename}.pdf"},
-    )
+        headers={"Content-Disposition": f"attachment; filename={filename}.pdf"})
 
+# Exports consumption report for one batch.
 
 @production_bp.get("/<int:batch_id>/consumption/download")
 def download_batch_consumption_report(batch_id: int):
@@ -1430,9 +1518,7 @@ def download_batch_consumption_report(batch_id: int):
         batch = (
             db.execute(
                 select(ProductionBatch).where(
-                    ProductionBatch.id == batch_id,
-                    ProductionBatch.client_id == DEFAULT_CLIENT_ID,
-                )
+                    ProductionBatch.id == batch_id)
             )
             .scalars()
             .one_or_none()
@@ -1454,15 +1540,19 @@ def download_batch_consumption_report(batch_id: int):
         batch_size=batch.batch_size,
         hmi_completed_count=batch.hmi_completed_count,
         hmi_status=batch.hmi_status,
-        rm_shortage_flag=batch.rm_shortage_flag,
-    )
+        rm_shortage_flag=batch.rm_shortage_flag)
     consumption_rows: list[tuple] = []
     total_weight_per_batch = 0.0
     total_weight = 0.0
 
     for material in materials:
         weight_per_batch = float(material.quantity or 0)
-        material_total_weight = weight_per_batch * total_batch
+        if material.total_quantity is not None:
+            material_total_weight = float(material.total_quantity or 0)
+        else:
+            material_total_weight = calculate_rm_consumption_quantity(
+                weight_per_batch,
+                total_batch)
         total_weight_per_batch += weight_per_batch
         total_weight += material_total_weight
         consumption_rows.append(
@@ -1470,8 +1560,7 @@ def download_batch_consumption_report(batch_id: int):
                 material.rm_name,
                 weight_per_batch,
                 total_batch,
-                material_total_weight,
-            )
+                material_total_weight)
         )
 
     consumption_rows.append(
@@ -1479,8 +1568,7 @@ def download_batch_consumption_report(batch_id: int):
             "TOTAL",
             total_weight_per_batch,
             total_batch,
-            total_weight,
-        )
+            total_weight)
     )
 
     batch_rows = [
@@ -1516,13 +1604,10 @@ def download_batch_consumption_report(batch_id: int):
         return Response(
             export_batch_consumption_report_excel(sections),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"},
-        )
+            headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"})
 
     return Response(
         export_batch_consumption_report_pdf(sections),
         mimetype="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename={filename}.pdf"},
-    )
-
+        headers={"Content-Disposition": f"attachment; filename={filename}.pdf"})
 

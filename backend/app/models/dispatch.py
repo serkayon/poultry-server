@@ -5,11 +5,13 @@ from datetime import datetime
 from ..database import Base
 
 
+# Define DispatchEntry.
+
 class DispatchEntry(Base):
     __tablename__ = "dispatch_entries"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    client_id: Mapped[int] = mapped_column(Integer)
+    dispatch_code: Mapped[str | None] = mapped_column(String(8), unique=True, index=True, nullable=True)
     date: Mapped[datetime] = mapped_column(DateTime)
     party_name: Mapped[str] = mapped_column(String(255))
     party_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -27,15 +29,21 @@ class DispatchEntry(Base):
     )
 
 
+# Define DispatchProduct.
+
 class DispatchProduct(Base):
     __tablename__ = "dispatch_products"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    dispatch_id: Mapped[int] = mapped_column(ForeignKey("dispatch_entries.id"))
+    dispatch_code: Mapped[str] = mapped_column(
+        ForeignKey("dispatch_entries.dispatch_code"),
+        index=True,
+    )
     product_type: Mapped[str] = mapped_column(String(100))
     num_bags: Mapped[float] = mapped_column(Float)
     weight_per_bag: Mapped[float] = mapped_column(Float)
     total_weight: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     dispatch_entry: Mapped["DispatchEntry"] = relationship(
         "DispatchEntry", back_populates="products"

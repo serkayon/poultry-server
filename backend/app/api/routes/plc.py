@@ -1,27 +1,28 @@
+# PLC monitoring and machine control routes.
+
 from datetime import datetime, timedelta
 
 from ..fastapi_compat import Blueprint, jsonify, request
 from sqlalchemy import case, func, select
 
-from ..common import DEFAULT_CLIENT_ID, db_session, dt, error, serialize_batch
+from ..common import db_session, dt, error, serialize_batch
 from ...models.plc import PLCDataSnapshot
 from ...models.production import ProductionBatch, ProductionBatchMaterial, ProductionReport
 from ...services.plc_simulator import (
     ensure_plc_live_data,
     get_or_create_machine_state,
-    set_machine_running,
-)
+    set_machine_running)
 from ...services.production_runtime import (
     RUN_STATUS_COMPLETED,
     RUN_STATUS_RUNNING,
     RUN_STATUS_STOPPED,
     normalize_batch_count,
-    sync_active_batch_progress,
-)
+    sync_active_batch_progress)
 from ...services.stock import collect_rm_shortages, format_rm_shortage_message
 
 plc_bp = Blueprint("plc", __name__, url_prefix="/api/plc")
 
+# Serialize the latest PLC snapshot into API payload form.
 
 def _serialize_plc_row(row: PLCDataSnapshot | None, running_status: bool) -> dict:
     resolved_status = int(row.process_status) if row and row.process_status is not None else (100 if running_status else 0)
@@ -43,12 +44,14 @@ def _serialize_plc_row(row: PLCDataSnapshot | None, running_status: bool) -> dic
         "recorded_at": dt(row.recorded_at) if row else None,
     }
 
+# Return the PLC status value with a running-state fallback.
 
 def _resolved_status(row: PLCDataSnapshot) -> int:
     if row.process_status is not None:
         return int(row.process_status)
     return 100 if bool(row.running_status) else 0
 
+# Serialize a historical PLC snapshot row.
 
 def _serialize_plc_history_row(row: PLCDataSnapshot) -> dict:
     resolved_status = _resolved_status(row)
@@ -66,17 +69,19 @@ def _serialize_plc_history_row(row: PLCDataSnapshot) -> dict:
         "pellet_motor_load": row.pellet_motor_load,
     }
 
+# Parse a query-string boolean flag.
 
 def _as_bool_arg(raw_value) -> bool:
     return str(raw_value or "").strip().lower() in {"1", "true", "yes", "on"}
 
+# Build the SQL expression used to filter running PLC rows.
 
 def _process_status_expr():
     return func.coalesce(
         PLCDataSnapshot.process_status,
-        case((PLCDataSnapshot.running_status.is_(True), 100), else_=0),
-    )
+        case((PLCDataSnapshot.running_status.is_(True), 100), else_=0))
 
+# Return the payload for the currently active batch, if any.
 
 def _active_batch_payload(db, machine_state) -> dict | None:
     if not machine_state.active_batch_id:
@@ -85,9 +90,7 @@ def _active_batch_payload(db, machine_state) -> dict | None:
     batch = (
         db.execute(
             select(ProductionBatch).where(
-                ProductionBatch.id == machine_state.active_batch_id,
-                ProductionBatch.client_id == DEFAULT_CLIENT_ID,
-            )
+                ProductionBatch.id == machine_state.active_batch_id)
         )
         .scalars()
         .one_or_none()
@@ -104,10 +107,14 @@ def _active_batch_payload(db, machine_state) -> dict | None:
     payload = serialize_batch(
         batch,
         has_report=has_report,
-        is_active=bool(machine_state.is_running and machine_state.active_batch_id == batch.id),
-    )
+        is_active=bool(machine_state.is_running and machine_state.active_batch_id == batch.id))
     payload["materials"] = [
-        {"id": row.id, "rm_name": row.rm_name, "quantity": row.quantity}
+        {
+            "id": row.id,
+            "rm_name": row.rm_name,
+            "quantity": row.quantity,
+            "total_quantity": row.total_quantity,
+        }
         for row in db.execute(
             select(ProductionBatchMaterial)
             .where(ProductionBatchMaterial.batch_id == batch.id)
@@ -118,6 +125,7 @@ def _active_batch_payload(db, machine_state) -> dict | None:
     ]
     return payload
 
+# Serialize the overall machine status response.
 
 def _machine_status_payload(machine_state, latest_row: PLCDataSnapshot | None, active_batch: dict | None) -> dict:
     resolved_status = (
@@ -135,6 +143,7 @@ def _machine_status_payload(machine_state, latest_row: PLCDataSnapshot | None, a
         "last_snapshot_at": dt(latest_row.recorded_at) if latest_row else None,
     }
 
+# Return the latest PLC snapshot.
 
 @plc_bp.get("/latest")
 def plc_latest():
@@ -147,6 +156,7 @@ def plc_latest():
         ).scalars().first()
         return jsonify(_serialize_plc_row(row=row, running_status=bool(machine_state.is_running)))
 
+# Return PLC history for a duration or the current running window.
 
 @plc_bp.get("/history")
 def plc_history():
@@ -182,8 +192,7 @@ def plc_history():
                     select(PLCDataSnapshot.recorded_at)
                     .where(
                         PLCDataSnapshot.recorded_at < run_end,
-                        status_expr != 100,
-                    )
+                        status_expr != 100)
                     .order_by(PLCDataSnapshot.recorded_at.desc())
                     .limit(1)
                 )
@@ -196,8 +205,7 @@ def plc_history():
                 .where(
                     PLCDataSnapshot.recorded_at >= run_window_start,
                     PLCDataSnapshot.recorded_at <= run_end,
-                    status_expr == 100,
-                )
+                    status_expr == 100)
                 .order_by(PLCDataSnapshot.recorded_at.asc())
             )
             if latest_non_running_at is not None:
@@ -221,6 +229,7 @@ def plc_history():
 
     return jsonify([_serialize_plc_history_row(row) for row in rows])
 
+# Return the current machine state and active batch payload.
 
 @plc_bp.get("/machine/status")
 def machine_status():
@@ -233,6 +242,7 @@ def machine_status():
         active_batch = _active_batch_payload(db, machine_state)
         return jsonify(_machine_status_payload(machine_state, latest_row, active_batch))
 
+# Start the machine and optionally attach an active batch.
 
 @plc_bp.post("/machine/start")
 def machine_start():
@@ -255,9 +265,7 @@ def machine_start():
             batch = (
                 db.execute(
                     select(ProductionBatch).where(
-                        ProductionBatch.id == batch_id,
-                        ProductionBatch.client_id == DEFAULT_CLIENT_ID,
-                    )
+                        ProductionBatch.id == batch_id)
                 )
                 .scalars()
                 .one_or_none()
@@ -292,14 +300,12 @@ def machine_start():
             )
             shortages = collect_rm_shortages(
                 db=db,
-                client_id=DEFAULT_CLIENT_ID,
                 date=batch.date,
                 materials=[
                     {"rm_name": row.rm_name, "quantity": row.quantity}
                     for row in material_rows
                 ],
-                batch_run_count=planned_count,
-            )
+                batch_run_count=planned_count)
             if shortages:
                 batch.rm_shortage_flag = True
                 batch.rm_shortage_detail = format_rm_shortage_message(
@@ -307,8 +313,7 @@ def machine_start():
                     heading=(
                         "Batch is running but projected raw material is insufficient "
                         f"for assigned count ({planned_count})"
-                    ),
-                )
+                    ))
             else:
                 batch.rm_shortage_flag = False
                 batch.rm_shortage_detail = None
@@ -322,8 +327,7 @@ def machine_start():
         machine_state = set_machine_running(
             db,
             running=True,
-            active_batch_id=batch_id if batch_id is not None else machine_state.active_batch_id,
-        )
+            active_batch_id=batch_id if batch_id is not None else machine_state.active_batch_id)
         sync_active_batch_progress(db, machine_state=machine_state)
         latest_row = db.execute(
             select(PLCDataSnapshot).order_by(PLCDataSnapshot.recorded_at.desc()).limit(1)
@@ -331,6 +335,7 @@ def machine_start():
         active_batch = _active_batch_payload(db, machine_state)
         return jsonify(_machine_status_payload(machine_state, latest_row, active_batch))
 
+# Stop the machine and clear the active batch.
 
 @plc_bp.post("/machine/stop")
 def machine_stop():

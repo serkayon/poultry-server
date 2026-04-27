@@ -1,15 +1,16 @@
-from sqlalchemy import String, Float, DateTime, Integer
+from sqlalchemy import String, Float, DateTime, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime
 
 from ..database import Base
 
 
+# Define RMStockLedger.
+
 class RMStockLedger(Base):
-    __tablename__ = "rm_stock_ledger"
+    __tablename__ = "raw_material_ledger"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    client_id: Mapped[int] = mapped_column(Integer)
     date: Mapped[datetime] = mapped_column(DateTime)
     rm_name: Mapped[str] = mapped_column(String(100))
     opening_stock: Mapped[float] = mapped_column(Float, default=0)
@@ -19,11 +20,27 @@ class RMStockLedger(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-class FeedStock(Base):
-    __tablename__ = "feed_stock"
+# Define RawMaterialStock.
+
+class RawMaterialStock(Base):
+    __tablename__ = "raw_material_stock"
+    __table_args__ = (
+        UniqueConstraint("rm_name", name="uq_raw_material_stock_rm"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    client_id: Mapped[int] = mapped_column(Integer)
+    rm_name: Mapped[str] = mapped_column(String(100), index=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_modified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# Define FeedStock.
+
+class FeedStock(Base):
+    __tablename__ = "feed_stock_ledger"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     date: Mapped[datetime] = mapped_column(DateTime)
     feed_type: Mapped[str] = mapped_column(String(100))
     # Bag size bucket key in grams (e.g. 25000 for 25kg bag).
@@ -34,3 +51,23 @@ class FeedStock(Base):
     dispatched: Mapped[float] = mapped_column(Float, default=0)
     closing_stock: Mapped[float] = mapped_column(Float, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+# Define FeedStockCurrent.
+
+class FeedStockCurrent(Base):
+    __tablename__ = "feed_stock"
+    __table_args__ = (
+        UniqueConstraint(
+            "feed_type",
+            "bag_weight_grams",
+            name="uq_feed_stock_feed_variant",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    feed_type: Mapped[str] = mapped_column(String(100), index=True)
+    bag_weight_grams: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_modified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

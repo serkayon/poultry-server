@@ -5,13 +5,15 @@ from datetime import datetime
 from ..database import Base
 
 
+# Define ProductionBatch.
+
 class ProductionBatch(Base):
     __tablename__ = "production_batches"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    client_id: Mapped[int] = mapped_column(Integer)
     batch_no: Mapped[str | None] = mapped_column(String(64), nullable=True)
     date: Mapped[datetime] = mapped_column(DateTime)
+    recipe_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     product_name: Mapped[str] = mapped_column(String(255))
     batch_size: Mapped[float] = mapped_column(Float)
     mop: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -19,7 +21,6 @@ class ProductionBatch(Base):
     num_bags: Mapped[float | None] = mapped_column(Float, nullable=True)
     weight_per_bag: Mapped[float | None] = mapped_column(Float, nullable=True)
     output: Mapped[float] = mapped_column(Float)
-    recipe_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     hmi_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     hmi_completed_count: Mapped[int] = mapped_column(Integer, default=0)
     hmi_status: Mapped[str] = mapped_column(String(32), default="pending")
@@ -41,6 +42,8 @@ class ProductionBatch(Base):
     )
 
 
+# Define ProductionBatchMaterial.
+
 class ProductionBatchMaterial(Base):
     __tablename__ = "production_batch_materials"
 
@@ -48,6 +51,7 @@ class ProductionBatchMaterial(Base):
     batch_id: Mapped[int] = mapped_column(ForeignKey("production_batches.id"))
     rm_name: Mapped[str] = mapped_column(String(255))
     quantity: Mapped[float] = mapped_column(Float)
+    total_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     batch: Mapped["ProductionBatch"] = relationship(
@@ -56,8 +60,10 @@ class ProductionBatchMaterial(Base):
     )
 
 
+# Define ProductionReport.
+
 class ProductionReport(Base):
-    __tablename__ = "production_reports"
+    __tablename__ = "production_batch_reports"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     batch_id: Mapped[int] = mapped_column(ForeignKey("production_batches.id"), unique=True)

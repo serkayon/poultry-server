@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { productionApi } from '../api/client'
 
+// Primary application shell with navigation and batch notifications.
 const nav = [
   { to: '/layout', label: 'Dashboard', icon: LayoutDashboard },
     { to: 'production', label: 'Production ', icon: Factory },
@@ -500,7 +501,7 @@ useEffect(() => {
                     <p className="text-[11px] font-extrabold uppercase tracking-[0.16em] text-slate-700">
                       {item.type === 'warning' ? 'Action Needed' : 'Batch Alert'}
                     </p>
-                    <p className="mt-0.5 text-sm font-semibold leading-5">{item.message}</p>
+                    <p className="mt-0.5 text-sm font-semibold leading-5 break-all">{item.message}</p>
                     <p className="mt-1 text-[11px] text-slate-600">
                       Go to Production and complete batch details.
                     </p>

@@ -1,10 +1,12 @@
+# Authentication and PIN management routes.
+
+
 import re
 
 from ..fastapi_compat import Blueprint, jsonify
 from sqlalchemy import select
 
 from ..common import (
-    DEFAULT_CLIENT_ID,
     current_user,
     db_session,
     error,
@@ -29,6 +31,8 @@ PIN_TYPE_FIELD_MAP = {
 }
 
 
+# Normalize a PIN scope value into one of the supported types.
+
 def _normalize_pin_type(raw_value: object) -> str:
     pin_type = str(raw_value or "settings").strip().lower()
     if not pin_type:
@@ -41,19 +45,20 @@ def _normalize_pin_type(raw_value: object) -> str:
     return pin_type
 
 
+# Resolve the user whose PIN should be checked or updated.
+
 def _resolve_pin_user(db):
     try:
         return current_user(db)
     except PermissionError:
-        fallback = db.get(User, DEFAULT_CLIENT_ID)
-        if fallback and fallback.is_active:
-            return fallback
         return (
             db.execute(select(User).where(User.is_active.is_(True)).order_by(User.id.asc()))
             .scalars()
             .one_or_none()
         )
 
+
+# Authenticate a user and return an access token.
 
 @auth_bp.post("/login")
 def auth_login():
@@ -76,6 +81,8 @@ def auth_login():
             db.flush()
         return jsonify(token_response(user))
 
+
+# Create a vendor account.
 
 @auth_bp.post("/vendor-signup")
 def vendor_signup():
@@ -105,13 +112,14 @@ def vendor_signup():
             full_name=full_name,
             role=UserRole.vendor.value,
             company_name=payload.get("company_name"),
-            address=payload.get("address"),
-        )
+            address=payload.get("address"))
         db.add(user)
         db.flush()
         db.refresh(user)
         return jsonify(serialize_user(user))
 
+
+# Create a customer account on behalf of the current vendor.
 
 @auth_bp.post("/vendor/customer-signup")
 def vendor_create_customer():
@@ -149,13 +157,14 @@ def vendor_create_customer():
             role=UserRole.customer.value,
             company_name=payload.get("company_name"),
             address=payload.get("address"),
-            created_by_id=vendor.id,
-        )
+            created_by_id=vendor.id)
         db.add(user)
         db.flush()
         db.refresh(user)
         return jsonify(serialize_user(user))
 
+
+# Return the demo vendor account token.
 
 @auth_bp.post("/demo/vendor")
 def demo_vendor_login():
@@ -166,6 +175,8 @@ def demo_vendor_login():
         return jsonify(token_response(user))
 
 
+# Return the demo customer account token.
+
 @auth_bp.post("/demo/customer")
 def demo_customer_login():
     with db_session() as db:
@@ -174,6 +185,8 @@ def demo_customer_login():
             return error("Demo customer not found. Create a customer account using signup.", 503)
         return jsonify(token_response(user))
 
+
+# Verify a scoped PIN for the current or fallback user.
 
 @auth_bp.post("/pin/verify")
 def verify_settings_pin():
@@ -198,6 +211,8 @@ def verify_settings_pin():
             return error("Invalid PIN", 401)
         return jsonify({"ok": True, "pin_type": pin_type})
 
+
+# Change a scoped PIN after verifying the current value.
 
 @auth_bp.post("/pin/change")
 def change_settings_pin():

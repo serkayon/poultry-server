@@ -1,3 +1,6 @@
+# Runtime helpers for production batches and stock posting.
+
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -11,8 +14,7 @@ from .stock import (
     add_feed_produced,
     collect_rm_shortages,
     format_rm_shortage_message,
-    rebuild_rm_stock_ledger,
-)
+    rebuild_rm_stock_ledger)
 
 
 RUN_STATUS_PENDING = "pending"
@@ -20,6 +22,8 @@ RUN_STATUS_RUNNING = "running"
 RUN_STATUS_STOPPED = "stopped"
 RUN_STATUS_COMPLETED = "completed"
 
+
+# Convert batch count input into a non-negative integer.
 
 def normalize_batch_count(value: float | int | None) -> int:
     try:
@@ -29,6 +33,8 @@ def normalize_batch_count(value: float | int | None) -> int:
     return max(0, count)
 
 
+# Return the configured batch duration in seconds.
+
 def _duration_seconds(batch: ProductionBatch) -> float:
     try:
         seconds = float(batch.hmi_duration_seconds or 0)
@@ -36,6 +42,8 @@ def _duration_seconds(batch: ProductionBatch) -> float:
         return 0
     return max(0, seconds)
 
+
+# Check whether the batch has enough data to post feed stock.
 
 def _is_batch_ready_for_stock(batch: ProductionBatch) -> bool:
     if bool(batch.stock_posted):
@@ -57,23 +65,24 @@ def _is_batch_ready_for_stock(batch: ProductionBatch) -> bool:
     return num_bags > 0 and weight_per_bag > 0 and output > 0
 
 
-def try_post_batch_stock(db: Session, *, batch: ProductionBatch, client_id: int) -> bool:
-    """Post feed stock once the batch is complete and all required details are available."""
+# Post feed stock once the batch is complete and all required details are available.
+
+def try_post_batch_stock(db: Session, *, batch: ProductionBatch) -> bool:
     if not _is_batch_ready_for_stock(batch):
         return False
 
     add_feed_produced(
         db=db,
-        client_id=client_id,
         feed_type=(batch.product_name or "").strip(),
         quantity=float(batch.output),
         date=batch.date,
-        weight_per_bag=batch.weight_per_bag,
-    )
+        weight_per_bag=batch.weight_per_bag)
     batch.stock_posted = True
     batch.last_modified_at = datetime.utcnow()
     return True
 
+
+# Load batch material rows into a lightweight payload.
 
 def _batch_material_payload(db: Session, *, batch_id: int) -> list[dict]:
     rows = (
@@ -88,12 +97,12 @@ def _batch_material_payload(db: Session, *, batch_id: int) -> list[dict]:
     return [{"rm_name": row.rm_name, "quantity": row.quantity} for row in rows]
 
 
+# Check whether the batch can complete without raw material shortages.
+
 def evaluate_mark_complete_eligibility(
     db: Session,
     *,
-    batch: ProductionBatch,
-    client_id: int,
-) -> tuple[bool, str | None]:
+    batch: ProductionBatch) -> tuple[bool, str | None]:
     assigned_count = normalize_batch_count(batch.batch_size)
     if assigned_count <= 0:
         return False, "Assigned batch count is invalid for this batch."
@@ -101,11 +110,9 @@ def evaluate_mark_complete_eligibility(
     materials = _batch_material_payload(db, batch_id=batch.id)
     shortages = collect_rm_shortages(
         db=db,
-        client_id=client_id,
         date=batch.date,
         materials=materials,
-        batch_run_count=assigned_count,
-    )
+        batch_run_count=assigned_count)
     if not shortages:
         return True, None
 
@@ -114,17 +121,16 @@ def evaluate_mark_complete_eligibility(
         heading=(
             "Cannot mark batch as complete until raw material stock is available "
             f"for assigned count ({assigned_count})"
-        ),
-    )
+        ))
     return False, detail
 
+
+# Finalize the batch count and refresh shortage state.
 
 def finalize_batch_consumption_state(
     db: Session,
     *,
-    batch: ProductionBatch,
-    client_id: int,
-) -> str | None:
+    batch: ProductionBatch) -> str | None:
     planned_count = normalize_batch_count(batch.batch_size)
     target_count = max(0, int(batch.hmi_completed_count or 0))
     if planned_count > 0:
@@ -134,11 +140,9 @@ def finalize_batch_consumption_state(
     materials = _batch_material_payload(db, batch_id=batch.id)
     shortages = collect_rm_shortages(
         db=db,
-        client_id=client_id,
         date=batch.date,
         materials=materials,
-        batch_run_count=target_count,
-    )
+        batch_run_count=target_count)
     if not shortages:
         batch.rm_shortage_flag = False
         batch.rm_shortage_detail = None
@@ -149,27 +153,24 @@ def finalize_batch_consumption_state(
         f"Assigned count: {planned_count}, utilized count: {target_count}.\n"
         + format_rm_shortage_message(
             shortages,
-            heading="Raw material shortage detected for this batch",
-        )
+            heading="Raw material shortage detected for this batch")
     )
     batch.rm_shortage_flag = True
     batch.rm_shortage_detail = detail
     return detail
 
 
+# Finalize runtime state and rebuild raw material balances when needed.
+
 def finalize_batch_runtime_state(
     db: Session,
     *,
-    batch: ProductionBatch,
-    client_id: int,
-) -> str | None:
+    batch: ProductionBatch) -> str | None:
     warning_detail = finalize_batch_consumption_state(
         db=db,
-        batch=batch,
-        client_id=client_id,
-    )
+        batch=batch)
     try:
-        rebuild_rm_stock_ledger(db=db, client_id=client_id)
+        rebuild_rm_stock_ledger(db=db)
     except ValueError as exc:
         batch.hmi_status = RUN_STATUS_STOPPED
         batch.rm_shortage_flag = True
@@ -181,17 +182,12 @@ def finalize_batch_runtime_state(
     return warning_detail
 
 
+# Advance the active batch counter and stop it when the run is finished.
+
 def sync_active_batch_progress(
     db: Session,
     *,
-    machine_state: MachineState,
-    client_id: int = 1,
-) -> ProductionBatch | None:
-    """
-    Update the active batch counter according to elapsed duration.
-    Auto-stops the batch when planned count is reached.
-    Final completion and stock/RM operations are handled manually.
-    """
+    machine_state: MachineState) -> ProductionBatch | None:
     if not machine_state.is_running or not machine_state.active_batch_id:
         return None
 

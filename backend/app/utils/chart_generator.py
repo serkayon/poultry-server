@@ -15,6 +15,8 @@ except ZoneInfoNotFoundError:
     IST_TIMEZONE = timezone(timedelta(hours=5, minutes=30), name="IST")
 
 
+# Handle to ist.
+
 def _to_ist(value):
     if value.tzinfo is None:
         utc_value = value.replace(tzinfo=timezone.utc)
@@ -23,6 +25,8 @@ def _to_ist(value):
     return utc_value.astimezone(IST_TIMEZONE)
 
 
+# Handle series values.
+
 def _series_values(rows, attr: str) -> list[float]:
     values: list[float] = []
     for row in rows:
@@ -30,6 +34,8 @@ def _series_values(rows, attr: str) -> list[float]:
         values.append(0.0 if value is None else float(value))
     return values
 
+
+# Handle nice bounds.
 
 def _nice_bounds(values: list[float]) -> tuple[float, float]:
     if not values:
@@ -44,11 +50,15 @@ def _nice_bounds(values: list[float]) -> tuple[float, float]:
     return low - pad, high + pad
 
 
+# Build time labels.
+
 def _build_time_labels(rows: list) -> list[str]:
     labels = [_to_ist(row.recorded_at).strftime("%H:%M") for row in rows]
     tick_every = max(1, len(labels) // 8)
     return [label if idx % tick_every == 0 or idx == len(labels) - 1 else "" for idx, label in enumerate(labels)]
 
+
+# Add chart title and legend.
 
 def _add_chart_title_and_legend(
     drawing: Drawing,
@@ -112,6 +122,8 @@ def _add_chart_title_and_legend(
         legend_x += item_width
 
 
+# Handle configure common axes.
+
 def _configure_common_axes(chart: HorizontalLineChart, labels: list[str]) -> None:
     chart.categoryAxis.categoryNames = labels
     chart.categoryAxis.labels.fontName = "Helvetica"
@@ -129,6 +141,8 @@ def _configure_common_axes(chart: HorizontalLineChart, labels: list[str]) -> Non
     chart.valueAxis.gridStrokeColor = colors.HexColor("#e2e8f0")
     chart.valueAxis.gridStrokeWidth = 0.4
 
+
+# Build line chart.
 
 def _build_line_chart(
     rows,
@@ -194,6 +208,8 @@ def _build_line_chart(
 
     return drawing
 
+
+# Build dual axis line chart.
 
 def _build_dual_axis_line_chart(
     rows,
@@ -330,6 +346,8 @@ def _build_dual_axis_line_chart(
 
     return drawing
 
+
+# Handle generate plc graph images.
 
 def generate_plc_graph_images(
     plc_rows: list,

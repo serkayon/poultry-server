@@ -1,11 +1,12 @@
+# Raw material type, entry, lab report, and export routes.
+
 from datetime import datetime
 
 from ..fastapi_compat import Blueprint, Response, jsonify, request
 from sqlalchemy import func, or_, select
 
 from ..common import (
-    DEFAULT_CLIENT_ID,
-    db_session,
+        db_session,
     error,
     json_body,
     parse_datetime,
@@ -13,23 +14,23 @@ from ..common import (
     resolve_period_range,
     required,
     dt,
-    serialize_raw_entry,
-)
+    serialize_raw_entry)
 from ...models.config import RecipeMaterial
 from ...models.production import ProductionBatchMaterial
 from ...models.raw_material import RawMaterialEntry, RawMaterialLabReport, RawMaterialType
-from ...models.stock import RMStockLedger
-from ...services.stock import rebuild_rm_stock_ledger
+from ...services.id_codes import assign_raw_material_entry_code
+from ...models.stock import RMStockLedger, RawMaterialStock
+from ...services.stock import add_rm_received, rebuild_rm_stock_ledger
 from ...utils.export import (
     export_raw_material_entry_report_excel,
     export_raw_material_entry_report_pdf,
     export_raw_material_report_excel,
     export_raw_material_report_pdf,
-    export_table_to_csv,
-)
+    export_table_to_csv)
 
 raw_material_bp = Blueprint("raw_material", __name__, url_prefix="/api/raw-material")
 
+# Normalize a filter token and treat placeholders as empty.
 
 def _normalize_filter_token(raw_value: str | None) -> str | None:
     value = str(raw_value or "").strip()
@@ -39,14 +40,51 @@ def _normalize_filter_token(raw_value: str | None) -> str | None:
         return None
     return value
 
+# Normalize a raw material entry code for lookups and output.
+
+def _normalize_entry_code(raw_value: object) -> str:
+    return str(raw_value or "").strip().upper()
+
+# Return a stable display code for a raw material entry.
+
+def _serialize_entry_code(entry: RawMaterialEntry) -> str:
+    if entry.entry_code:
+        return _normalize_entry_code(entry.entry_code)
+    return "RMX00000"
+
+# Map lab report quality values to Good/Bad labels.
+
+def _normalize_quality_grade(value: object) -> str | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text in {"good", "g", "1", "yes", "y", "true"}:
+        return "Good"
+    if text in {"bad", "b", "0", "no", "n", "false"}:
+        return "Bad"
+    return str(value).strip().title()
+
+# Load a raw material entry by its display code.
+
+def _load_raw_material_entry_by_code(db, entry_code: str) -> RawMaterialEntry | None:
+    normalized_code = _normalize_entry_code(entry_code)
+    return (
+        db.execute(
+            select(RawMaterialEntry).where(
+                RawMaterialEntry.entry_code == normalized_code)
+        )
+        .scalars()
+        .one_or_none()
+    )
+
+# Serialize a raw material lab report.
 
 def _serialize_lab_report(report: RawMaterialLabReport) -> dict:
+    entry_code = _normalize_entry_code(report.entry_code)
     return {
-        "id": report.id,
-        "entry_id": report.entry_id,
+        "entry_code": entry_code,
         "protein": report.protein,
         "fat": report.fat,
-        "nitrogen": report.nitrogen,
         "fiber": report.fiber,
         "ash": report.ash,
         "calcium": report.calcium,
@@ -63,8 +101,10 @@ def _serialize_lab_report(report: RawMaterialLabReport) -> dict:
         "colour": report.colour,
         "smell": report.smell,
         "created_at": dt(report.created_at),
+        "last_modified_at": dt(report.last_modified_at),
     }
 
+# Return all raw material types.
 
 @raw_material_bp.get("/types")
 def list_rm_types():
@@ -80,12 +120,13 @@ def list_rm_types():
                 "id": row.id,
                 "name": row.name,
                 "created_at": dt(row.created_at),
-                "last_modified_at": dt(row.last_modified_at or row.created_at),
+                "last_modified_at": dt(row.last_modified_at),
             }
             for row in rows
         ]
     )
 
+# Create a raw material type.
 
 @raw_material_bp.post("/types")
 def add_rm_type():
@@ -104,7 +145,7 @@ def add_rm_type():
         if existing:
             return error("RM type already exists")
 
-        row = RawMaterialType(name=name, last_modified_at=datetime.utcnow())
+        row = RawMaterialType(name=name)
         db.add(row)
         db.flush()
         return jsonify(
@@ -112,10 +153,11 @@ def add_rm_type():
                 "id": row.id,
                 "name": row.name,
                 "created_at": dt(row.created_at),
-                "last_modified_at": dt(row.last_modified_at or row.created_at),
+                "last_modified_at": dt(row.last_modified_at),
             }
         )
 
+# Rename a raw material type and cascade the name change.
 
 @raw_material_bp.put("/types/<int:type_id>")
 def update_rm_type(type_id: int):
@@ -132,8 +174,7 @@ def update_rm_type(type_id: int):
             db.execute(
                 select(RawMaterialType).where(
                     func.lower(RawMaterialType.name) == name.lower(),
-                    RawMaterialType.id != type_id,
-                )
+                    RawMaterialType.id != type_id)
             )
             .scalars()
             .one_or_none()
@@ -181,16 +222,25 @@ def update_rm_type(type_id: int):
         for item in stock_rows:
             item.rm_name = name
 
+        current_stock_rows = (
+            db.execute(select(RawMaterialStock).where(func.lower(RawMaterialStock.rm_name) == old_name.lower()))
+            .scalars()
+            .all()
+        )
+        for item in current_stock_rows:
+            item.rm_name = name
+
         db.flush()
         return jsonify(
             {
                 "id": row.id,
                 "name": row.name,
                 "created_at": dt(row.created_at),
-                "last_modified_at": dt(row.last_modified_at or row.created_at),
+                "last_modified_at": dt(row.last_modified_at),
             }
         )
 
+# Delete a raw material type when it is not in use.
 
 @raw_material_bp.delete("/types/<int:type_id>")
 def delete_rm_type(type_id: int):
@@ -212,6 +262,7 @@ def delete_rm_type(type_id: int):
         db.flush()
         return jsonify({"id": type_id, "deleted": True})
 
+# Return raw material entries for the current client.
 
 @raw_material_bp.get("")
 def list_raw_material_entries():
@@ -223,7 +274,7 @@ def list_raw_material_entries():
     rm_type = request.args.get("rm_type")
 
     with db_session() as db:
-        query = select(RawMaterialEntry).where(RawMaterialEntry.client_id == DEFAULT_CLIENT_ID)
+        query = select(RawMaterialEntry)
         if from_date:
             query = query.where(RawMaterialEntry.date >= from_date)
         if to_date:
@@ -235,9 +286,11 @@ def list_raw_material_entries():
         entries = db.execute(query).scalars().all()
         out = []
         for entry in entries:
+            if not entry.entry_code:
+                assign_raw_material_entry_code(db, entry)
             has_lab = (
                 db.execute(
-                    select(RawMaterialLabReport).where(RawMaterialLabReport.entry_id == entry.id)
+                    select(RawMaterialLabReport).where(RawMaterialLabReport.entry_code == _serialize_entry_code(entry))
                 )
                 .scalars()
                 .one_or_none()
@@ -246,6 +299,7 @@ def list_raw_material_entries():
             out.append(serialize_raw_entry(entry, has_lab))
     return jsonify(out)
 
+# Return raw material entries within a reporting period.
 
 @raw_material_bp.get("/filtered/<period>/<path:rm_type>")
 def list_raw_material_entries_by_period(period: str, rm_type: str):
@@ -253,14 +307,13 @@ def list_raw_material_entries_by_period(period: str, rm_type: str):
         from_date, to_date = resolve_period_range(
             period,
             from_date_raw=request.args.get("from_date"),
-            to_date_raw=request.args.get("to_date"),
-        )
+            to_date_raw=request.args.get("to_date"))
     except ValueError as exc:
         return error(str(exc))
     normalized_rm_type = _normalize_filter_token(rm_type)
 
     with db_session() as db:
-        query = select(RawMaterialEntry).where(RawMaterialEntry.client_id == DEFAULT_CLIENT_ID)
+        query = select(RawMaterialEntry)
         query = query.where(RawMaterialEntry.date >= from_date)
         query = query.where(RawMaterialEntry.date <= to_date)
         if normalized_rm_type:
@@ -270,9 +323,13 @@ def list_raw_material_entries_by_period(period: str, rm_type: str):
         entries = db.execute(query).scalars().all()
         out = []
         for entry in entries:
+            if not entry.entry_code:
+                assign_raw_material_entry_code(db, entry)
             has_lab = (
                 db.execute(
-                    select(RawMaterialLabReport).where(RawMaterialLabReport.entry_id == entry.id)
+                    select(RawMaterialLabReport).where(
+                        RawMaterialLabReport.entry_code == _serialize_entry_code(entry)
+                    )
                 )
                 .scalars()
                 .one_or_none()
@@ -281,6 +338,7 @@ def list_raw_material_entries_by_period(period: str, rm_type: str):
             out.append(serialize_raw_entry(entry, has_lab))
     return jsonify(out)
 
+# Return summary totals for raw material receipts and stock.
 
 @raw_material_bp.get("/summary/<period>/<path:rm_type>")
 def summarize_raw_material_by_period(period: str, rm_type: str):
@@ -288,40 +346,25 @@ def summarize_raw_material_by_period(period: str, rm_type: str):
         from_date, to_date = resolve_period_range(
             period,
             from_date_raw=request.args.get("from_date"),
-            to_date_raw=request.args.get("to_date"),
-        )
+            to_date_raw=request.args.get("to_date"))
     except ValueError as exc:
         return error(str(exc))
     normalized_rm_type = _normalize_filter_token(rm_type)
 
     with db_session() as db:
         entry_query = select(RawMaterialEntry).where(
-            RawMaterialEntry.client_id == DEFAULT_CLIENT_ID,
             RawMaterialEntry.date >= from_date,
-            RawMaterialEntry.date <= to_date,
-        )
+            RawMaterialEntry.date <= to_date)
         if normalized_rm_type:
             entry_query = entry_query.where(RawMaterialEntry.rm_type == normalized_rm_type)
         entry_rows = db.execute(entry_query).scalars().all()
         total_received_kg = sum(float(row.total_weight or 0) for row in entry_rows)
 
-        stock_query = select(RMStockLedger).where(
-            RMStockLedger.client_id == DEFAULT_CLIENT_ID,
-            RMStockLedger.date >= from_date,
-            RMStockLedger.date <= to_date,
-        )
+        stock_query = select(RawMaterialStock)
         if normalized_rm_type:
-            stock_query = stock_query.where(RMStockLedger.rm_name == normalized_rm_type)
-        stock_query = stock_query.order_by(RMStockLedger.date.desc(), RMStockLedger.id.desc())
+            stock_query = stock_query.where(RawMaterialStock.rm_name == normalized_rm_type)
         stock_rows = db.execute(stock_query).scalars().all()
-
-        latest_stock_by_name: dict[str, float] = {}
-        for row in stock_rows:
-            key = str(row.rm_name or "").strip()
-            if not key or key in latest_stock_by_name:
-                continue
-            latest_stock_by_name[key] = float(row.closing_stock or 0)
-        total_stock_kg = sum(latest_stock_by_name.values())
+        total_stock_kg = sum(float(row.quantity or 0) for row in stock_rows)
 
     return jsonify(
         {
@@ -334,6 +377,7 @@ def summarize_raw_material_by_period(period: str, rm_type: str):
         }
     )
 
+# Create a raw material entry and update live RM stock.
 
 @raw_material_bp.post("")
 def create_raw_material_entry():
@@ -346,15 +390,13 @@ def create_raw_material_entry():
         if total_weight is None or total_weight <= 0:
             raise ValueError("total_weight must be greater than 0")
         entry = RawMaterialEntry(
-            client_id=DEFAULT_CLIENT_ID,
             date=date,
             rm_type=required(payload, "rm_type"),
             supplier=required(payload, "supplier"),
             challan_no=required(payload, "challan_no"),
             vehicle_no=required(payload, "vehicle_no"),
             total_weight=total_weight,
-            remarks=payload.get("remarks"),
-        )
+            remarks=payload.get("remarks"))
     except ValueError as exc:
         return error(str(exc))
 
@@ -362,15 +404,22 @@ def create_raw_material_entry():
         with db_session() as db:
             db.add(entry)
             db.flush()
+            assign_raw_material_entry_code(db, entry)
+            db.flush()
             db.refresh(entry)
-            rebuild_rm_stock_ledger(db=db, client_id=DEFAULT_CLIENT_ID)
+            add_rm_received(
+                db=db,
+                rm_name=entry.rm_type,
+                quantity=float(entry.total_weight or 0),
+                date=entry.date)
             return jsonify(serialize_raw_entry(entry, has_lab=False))
     except ValueError as exc:
         return error(str(exc))
 
+# Update a raw material entry and rebuild RM stock balances.
 
-@raw_material_bp.put("/<int:entry_id>")
-def update_raw_material_entry(entry_id: int):
+@raw_material_bp.put("/<entry_code>")
+def update_raw_material_entry(entry_code: str):
     try:
         payload = json_body()
         date = parse_datetime(required(payload, "date"), "date")
@@ -388,9 +437,12 @@ def update_raw_material_entry(entry_id: int):
 
     try:
         with db_session() as db:
-            entry = db.get(RawMaterialEntry, entry_id)
-            if not entry or entry.client_id != DEFAULT_CLIENT_ID:
+            entry = _load_raw_material_entry_by_code(db, entry_code)
+            if not entry:
                 return error("Entry not found", 404)
+            if not entry.entry_code:
+                assign_raw_material_entry_code(db, entry)
+                db.flush()
 
             entry.date = date
             entry.rm_type = rm_type
@@ -402,10 +454,10 @@ def update_raw_material_entry(entry_id: int):
             entry.last_modified_at = datetime.utcnow()
             db.flush()
 
-            rebuild_rm_stock_ledger(db=db, client_id=DEFAULT_CLIENT_ID)
+            rebuild_rm_stock_ledger(db=db)
 
             has_lab = (
-                db.execute(select(RawMaterialLabReport).where(RawMaterialLabReport.entry_id == entry.id))
+                db.execute(select(RawMaterialLabReport).where(RawMaterialLabReport.entry_code == _serialize_entry_code(entry)))
                 .scalars()
                 .one_or_none()
                 is not None
@@ -414,32 +466,36 @@ def update_raw_material_entry(entry_id: int):
     except ValueError as exc:
         return error(str(exc))
 
+# Create or update a raw material lab report.
 
 @raw_material_bp.post("/lab-report")
 def submit_raw_material_lab_report():
     try:
         payload = json_body()
-        entry_id = int(required(payload, "entry_id"))
+        entry_code = _normalize_entry_code(required(payload, "entry_code"))
     except (ValueError, TypeError) as exc:
         return error(str(exc))
 
     with db_session() as db:
-        entry = db.get(RawMaterialEntry, entry_id)
+        entry = _load_raw_material_entry_by_code(db, entry_code)
         if not entry:
             return error("Entry not found", 404)
+        if not entry.entry_code:
+            assign_raw_material_entry_code(db, entry)
+            db.flush()
 
         report = (
-            db.execute(select(RawMaterialLabReport).where(RawMaterialLabReport.entry_id == entry_id))
+            db.execute(select(RawMaterialLabReport).where(RawMaterialLabReport.entry_code == _serialize_entry_code(entry)))
             .scalars()
             .one_or_none()
         )
+        is_new_report = report is None
         if not report:
-            report = RawMaterialLabReport(entry_id=entry_id)
+            report = RawMaterialLabReport(entry_code=_serialize_entry_code(entry))
             db.add(report)
 
         report.protein = parse_float(payload, "protein")
         report.fat = parse_float(payload, "fat")
-        report.nitrogen = parse_float(payload, "nitrogen")
         report.fiber = parse_float(payload, "fiber")
         report.ash = parse_float(payload, "ash")
         report.calcium = parse_float(payload, "calcium")
@@ -453,28 +509,36 @@ def submit_raw_material_lab_report():
         report.dunkey = payload.get("dunkey")
         report.fm = payload.get("fm")
         report.maize_count = payload.get("maize_count")
-        report.colour = payload.get("colour")
-        report.smell = payload.get("smell")
+        report.colour = _normalize_quality_grade(payload.get("colour"))
+        report.smell = _normalize_quality_grade(payload.get("smell"))
+        if not is_new_report:
+            report.last_modified_at = datetime.utcnow()
         db.flush()
-        return jsonify({"id": report.id, "entry_id": entry_id})
+        return jsonify({"entry_code": _serialize_entry_code(entry), "saved": True})
 
+# Return the lab report for a raw material entry.
 
-@raw_material_bp.get("/lab-report/<int:entry_id>")
-def get_raw_material_lab_report(entry_id: int):
+@raw_material_bp.get("/lab-report/<entry_code>")
+def get_raw_material_lab_report(entry_code: str):
     with db_session() as db:
-        entry = db.get(RawMaterialEntry, entry_id)
-        if not entry or entry.client_id != DEFAULT_CLIENT_ID:
+        entry = _load_raw_material_entry_by_code(db, entry_code)
+        if not entry:
             return error("Entry not found", 404)
+        if not entry.entry_code:
+            assign_raw_material_entry_code(db, entry)
+            db.flush()
+        serialized_code = _serialize_entry_code(entry)
 
         report = (
-            db.execute(select(RawMaterialLabReport).where(RawMaterialLabReport.entry_id == entry_id))
+            db.execute(select(RawMaterialLabReport).where(RawMaterialLabReport.entry_code == _serialize_entry_code(entry)))
             .scalars()
             .one_or_none()
         )
         if not report:
-            return jsonify({"entry_id": entry_id, "report": None})
-        return jsonify({"entry_id": entry_id, "report": _serialize_lab_report(report)})
+            return jsonify({"entry_code": serialized_code, "report": None})
+        return jsonify({"entry_code": serialized_code, "report": _serialize_lab_report(report)})
 
+# Download raw material entries as CSV, Excel, or PDF.
 
 @raw_material_bp.get("/download")
 def download_raw_material():
@@ -489,7 +553,7 @@ def download_raw_material():
     file_format = request.args.get("format", "pdf").lower()
 
     with db_session() as db:
-        query = select(RawMaterialEntry).where(RawMaterialEntry.client_id == DEFAULT_CLIENT_ID)
+        query = select(RawMaterialEntry)
         if from_date:
             query = query.where(RawMaterialEntry.date >= from_date)
         if to_date:
@@ -500,26 +564,30 @@ def download_raw_material():
             pattern = f"%{query_text}%"
             query = query.where(
                 or_(
+                    RawMaterialEntry.entry_code.ilike(pattern),
                     RawMaterialEntry.rm_type.ilike(pattern),
                     RawMaterialEntry.supplier.ilike(pattern),
                     RawMaterialEntry.vehicle_no.ilike(pattern),
-                    RawMaterialEntry.challan_no.ilike(pattern),
-                )
+                    RawMaterialEntry.challan_no.ilike(pattern))
             )
         query = query.order_by(RawMaterialEntry.date.desc())
         entries = db.execute(query).scalars().all()
+        for row in entries:
+            if not row.entry_code:
+                assign_raw_material_entry_code(db, row)
+        db.flush()
 
-    headers = ["Date", "RM Type", "Supplier", "Challan No", "Vehicle No", "Total Weight", "Remarks"]
+    headers = ["Entry Code", "Date", "RM Type", "Supplier", "Challan No", "Vehicle No", "Total Weight", "Remarks"]
     rows = [
         (
+            _serialize_entry_code(row),
             row.date.strftime("%Y-%m-%d"),
             row.rm_type,
             row.supplier,
             row.challan_no,
             row.vehicle_no,
             row.total_weight,
-            row.remarks or "",
-        )
+            row.remarks or "")
         for row in entries
     ]
 
@@ -527,50 +595,43 @@ def download_raw_material():
         return Response(
             export_table_to_csv(headers, rows),
             mimetype="text/csv",
-            headers={"Content-Disposition": "attachment; filename=raw_material_report.csv"},
-        )
+            headers={"Content-Disposition": "attachment; filename=raw_material_report.csv"})
     if file_format in ("excel", "xlsx"):
         return Response(
             export_raw_material_report_excel(headers, rows),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=raw_material_report.xlsx"},
-        )
+            headers={"Content-Disposition": "attachment; filename=raw_material_report.xlsx"})
     return Response(
-        export_raw_material_report_pdf(headers, rows),
+        export_raw_material_report_pdf(headers, rows, date_column_index=1),
         mimetype="application/pdf",
-        headers={"Content-Disposition": "attachment; filename=raw_material_report.pdf"},
-    )
+        headers={"Content-Disposition": "attachment; filename=raw_material_report.pdf"})
 
+# Download a single raw material entry report.
 
-@raw_material_bp.get("/<int:entry_id>/download")
-def download_raw_material_entry(entry_id: int):
+@raw_material_bp.get("/<entry_code>/download")
+def download_raw_material_entry(entry_code: str):
     file_format = request.args.get("format", "pdf").lower()
     if file_format not in ("pdf", "excel", "xlsx"):
         return error("format must be one of: pdf, excel, xlsx")
 
     with db_session() as db:
-        entry = (
-            db.execute(
-                select(RawMaterialEntry).where(
-                    RawMaterialEntry.id == entry_id,
-                    RawMaterialEntry.client_id == DEFAULT_CLIENT_ID,
-                )
-            )
-            .scalars()
-            .one_or_none()
-        )
+        entry = _load_raw_material_entry_by_code(db, entry_code)
         if not entry:
             return error("Entry not found", 404)
+        if not entry.entry_code:
+            assign_raw_material_entry_code(db, entry)
+            db.flush()
+        serialized_code = _serialize_entry_code(entry)
 
         report = (
-            db.execute(select(RawMaterialLabReport).where(RawMaterialLabReport.entry_id == entry_id))
+            db.execute(select(RawMaterialLabReport).where(RawMaterialLabReport.entry_code == _serialize_entry_code(entry)))
             .scalars()
             .one_or_none()
         )
 
     details_headers = ["Field", "Value"]
     details_rows = [
-        ("Entry ID", entry.id),
+        ("Entry Code", serialized_code),
         ("Date", entry.date.strftime("%Y-%m-%d")),
         ("RM Type", entry.rm_type),
         ("Supplier", entry.supplier),
@@ -624,15 +685,14 @@ def download_raw_material_entry(entry_id: int):
         },
     ]
 
-    filename = f"raw_material_entry_{entry_id}_report"
+    filename = f"raw_material_entry_{serialized_code}_report"
     if file_format in ("excel", "xlsx"):
         return Response(
             export_raw_material_entry_report_excel(sections),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"},
-        )
+            headers={"Content-Disposition": f"attachment; filename={filename}.xlsx"})
     return Response(
         export_raw_material_entry_report_pdf(sections),
         mimetype="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename={filename}.pdf"},
-    )
+        headers={"Content-Disposition": f"attachment; filename={filename}.pdf"})
+
