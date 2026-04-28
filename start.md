@@ -17,7 +17,9 @@
 
 >npm run dev
 
-> ip http://43.205.124.78/
+> ip http://43.205.124.78/   windows
+
+> ip http://65.2.181.255/    linux
 
 git add .
 git commit -m "updated feature"
