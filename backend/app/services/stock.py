@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime, timedelta
 from math import floor
 from typing import Mapping, Sequence
@@ -149,11 +150,17 @@ def get_rm_available_stock(
         if current_row is not None:
             return float(current_row.quantity or 0)
 
-    row = db.execute(
-        select(RMStockLedger).where(
-            RMStockLedger.rm_name == normalized_rm_name,
-            RMStockLedger.date == day)
-    ).scalars().one_or_none()
+    row = (
+        db.execute(
+            select(RMStockLedger).where(
+                RMStockLedger.rm_name == normalized_rm_name,
+                RMStockLedger.date == day)
+            .order_by(RMStockLedger.id.desc())
+            .limit(1)
+        )
+        .scalars()
+        .one_or_none()
+    )
 
     if row:
         return (
@@ -298,7 +305,7 @@ def _latest_rm_closing(
         .where(
             RMStockLedger.rm_name == _normalize_rm_name(rm_name),
             RMStockLedger.date < day)
-        .order_by(RMStockLedger.date.desc())
+        .order_by(RMStockLedger.date.desc(), RMStockLedger.id.desc())
         .limit(1)
     ).scalars().one_or_none()
     return float(latest.closing_stock if latest else 0)
@@ -377,11 +384,17 @@ def _get_or_create_rm_row(
     rm_name: str,
     date: datetime) -> RMStockLedger:
     day = _start_of_day(date)
-    row = db.execute(
-        select(RMStockLedger).where(
-            RMStockLedger.rm_name == rm_name,
-            RMStockLedger.date == day)
-    ).scalars().one_or_none()
+    row = (
+        db.execute(
+            select(RMStockLedger).where(
+                RMStockLedger.rm_name == rm_name,
+                RMStockLedger.date == day)
+            .order_by(RMStockLedger.id.desc())
+            .limit(1)
+        )
+        .scalars()
+        .one_or_none()
+    )
     if row:
         return row
 
@@ -663,16 +676,25 @@ def add_feed_dispatched(
 def rebuild_rm_stock_ledger(db: Session) -> None:
     # Rebuild complete RM ledger from RM inward entries + production consumption.
     existing_rows = (
-        db.execute(select(RMStockLedger))
+        db.execute(select(RMStockLedger).order_by(RMStockLedger.id.asc()))
         .scalars()
         .all()
     )
+    existing_by_key: dict[tuple[datetime, str], RMStockLedger] = {}
+    duplicate_rows: list[RMStockLedger] = []
     for row in existing_rows:
-        row.opening_stock = 0
-        row.received = 0
-        row.consumption = 0
-        row.closing_stock = 0
-    db.flush()
+        rm_name = _normalize_rm_name(row.rm_name)
+        if not rm_name:
+            duplicate_rows.append(row)
+            continue
+        day = _start_of_day(row.date)
+        key = (day, rm_name)
+        if key in existing_by_key:
+            duplicate_rows.append(row)
+            continue
+        row.date = day
+        row.rm_name = rm_name
+        existing_by_key[key] = row
 
     rm_entries = (
         db.execute(
@@ -685,13 +707,13 @@ def rebuild_rm_stock_ledger(db: Session) -> None:
         )
         .all()
     )
+    received_by_key: dict[tuple[datetime, str], float] = defaultdict(float)
     for date, rm_type, total_weight in rm_entries:
-        add_rm_received(
-            db=db,
-            rm_name=rm_type,
-            quantity=float(total_weight),
-            date=date,
-            update_snapshot=False)
+        rm_name = _normalize_rm_name(rm_type)
+        if not rm_name:
+            continue
+        key = (_start_of_day(date), rm_name)
+        received_by_key[key] += float(total_weight or 0)
 
     consumption_rows = (
         db.execute(
@@ -712,6 +734,7 @@ def rebuild_rm_stock_ledger(db: Session) -> None:
         )
         .all()
     )
+    consumption_by_key: dict[tuple[datetime, str], float] = defaultdict(float)
     for (
         date,
         rm_name,
@@ -730,12 +753,51 @@ def rebuild_rm_stock_ledger(db: Session) -> None:
             batch_run_count=effective_count)
         if consumption_quantity <= 0:
             continue
-        add_rm_consumption(
-            db=db,
-            rm_name=rm_name,
-            quantity=consumption_quantity,
-            date=date,
-            update_snapshot=False)
+        normalized_rm_name = _normalize_rm_name(rm_name)
+        if not normalized_rm_name:
+            continue
+        key = (_start_of_day(date), normalized_rm_name)
+        consumption_by_key[key] += float(consumption_quantity)
+
+    all_keys = sorted(
+        set(received_by_key.keys()) | set(consumption_by_key.keys()),
+        key=lambda item: (item[0], item[1]),
+    )
+
+    final_by_key: dict[tuple[datetime, str], tuple[float, float, float, float]] = {}
+    latest_closing_by_name: dict[str, float] = {}
+    for day, rm_name in all_keys:
+        opening = float(latest_closing_by_name.get(rm_name, 0.0))
+        received = float(received_by_key.get((day, rm_name), 0.0))
+        consumption = float(consumption_by_key.get((day, rm_name), 0.0))
+        closing = opening + received - consumption
+        final_by_key[(day, rm_name)] = (opening, received, consumption, closing)
+        latest_closing_by_name[rm_name] = closing
+
+    for key, (opening, received, consumption, closing) in final_by_key.items():
+        row = existing_by_key.pop(key, None)
+        if row is None:
+            db.add(
+                RMStockLedger(
+                    date=key[0],
+                    rm_name=key[1],
+                    opening_stock=opening,
+                    received=received,
+                    consumption=consumption,
+                    closing_stock=closing,
+                )
+            )
+            continue
+        row.opening_stock = opening
+        row.received = received
+        row.consumption = consumption
+        row.closing_stock = closing
+
+    for row in existing_by_key.values():
+        db.delete(row)
+    for row in duplicate_rows:
+        db.delete(row)
+    db.flush()
 
     # Rebuild the snapshot from the final ledger state so the current table
     # always matches the authoritative closing balances exactly.
@@ -806,16 +868,27 @@ def rebuild_rm_stock_snapshot(db: Session) -> None:
 def rebuild_feed_stock_ledger(db: Session) -> None:
     # Rebuild complete feed ledger from production output + dispatch entries.
     existing_rows = (
-        db.execute(select(FeedStock))
+        db.execute(select(FeedStock).order_by(FeedStock.id.asc()))
         .scalars()
         .all()
     )
+    existing_by_key: dict[tuple[datetime, str, int | None], FeedStock] = {}
+    duplicate_rows: list[FeedStock] = []
     for row in existing_rows:
-        row.opening_stock = 0
-        row.produced = 0
-        row.dispatched = 0
-        row.closing_stock = 0
-    db.flush()
+        feed_type = _normalize_feed_type(row.feed_type)
+        if not feed_type:
+            duplicate_rows.append(row)
+            continue
+        day = _start_of_day(row.date)
+        bag_weight_grams = _normalize_bag_weight_key(row.bag_weight_grams)
+        key = (day, feed_type, bag_weight_grams)
+        if key in existing_by_key:
+            duplicate_rows.append(row)
+            continue
+        row.date = day
+        row.feed_type = feed_type
+        row.bag_weight_grams = bag_weight_grams
+        existing_by_key[key] = row
 
     current_rows = (
         db.execute(select(FeedStockCurrent))
@@ -840,13 +913,14 @@ def rebuild_feed_stock_ledger(db: Session) -> None:
         )
         .all()
     )
+    produced_by_key: dict[tuple[datetime, str, int | None], float] = defaultdict(float)
     for date, product_name, weight_per_bag, output in produced_rows:
-        add_feed_produced(
-            db=db,
-            feed_type=product_name,
-            quantity=float(output),
-            date=date,
-            weight_per_bag=weight_per_bag)
+        feed_type = _normalize_feed_type(product_name)
+        if not feed_type:
+            continue
+        bag_weight_grams = _normalize_bag_weight_grams(weight_per_bag)
+        key = (_start_of_day(date), feed_type, bag_weight_grams)
+        produced_by_key[key] += float(output or 0)
 
     dispatch_rows = (
         db.execute(
@@ -861,16 +935,67 @@ def rebuild_feed_stock_ledger(db: Session) -> None:
         )
         .all()
     )
+    dispatched_by_key: dict[tuple[datetime, str, int | None], float] = defaultdict(float)
     for date, product_type, weight_per_bag, total_weight in dispatch_rows:
         # Dispatch entries are stored in UTC-naive form after API parsing.
         # Shift to IST wall clock before daily ledger bucketing.
-        ledger_date = date + IST_OFFSET
-        add_feed_dispatched(
-            db=db,
-            feed_type=product_type,
-            quantity=float(total_weight),
-            date=ledger_date,
-            weight_per_bag=weight_per_bag)
+        feed_type = _normalize_feed_type(product_type)
+        if not feed_type:
+            continue
+        bag_weight_grams = _normalize_bag_weight_grams(weight_per_bag)
+        ledger_date = _start_of_day(date + IST_OFFSET)
+        key = (ledger_date, feed_type, bag_weight_grams)
+        dispatched_by_key[key] += float(total_weight or 0)
+
+    all_keys = sorted(
+        set(produced_by_key.keys()) | set(dispatched_by_key.keys()),
+        key=lambda item: (item[0], item[1], -1 if item[2] is None else item[2]),
+    )
+
+    final_by_key: dict[
+        tuple[datetime, str, int | None],
+        tuple[float, float, float, float],
+    ] = {}
+    latest_closing_by_variant: dict[tuple[str, int | None], float] = {}
+    for day, feed_type, bag_weight_grams in all_keys:
+        variant_key = (feed_type, bag_weight_grams)
+        opening = float(latest_closing_by_variant.get(variant_key, 0.0))
+        produced = float(produced_by_key.get((day, feed_type, bag_weight_grams), 0.0))
+        dispatched = float(dispatched_by_key.get((day, feed_type, bag_weight_grams), 0.0))
+        closing = opening + produced - dispatched
+        final_by_key[(day, feed_type, bag_weight_grams)] = (
+            opening,
+            produced,
+            dispatched,
+            closing,
+        )
+        latest_closing_by_variant[variant_key] = closing
+
+    for key, (opening, produced, dispatched, closing) in final_by_key.items():
+        row = existing_by_key.pop(key, None)
+        if row is None:
+            db.add(
+                FeedStock(
+                    date=key[0],
+                    feed_type=key[1],
+                    bag_weight_grams=key[2],
+                    opening_stock=opening,
+                    produced=produced,
+                    dispatched=dispatched,
+                    closing_stock=closing,
+                )
+            )
+            continue
+        row.opening_stock = opening
+        row.produced = produced
+        row.dispatched = dispatched
+        row.closing_stock = closing
+
+    for row in existing_by_key.values():
+        db.delete(row)
+    for row in duplicate_rows:
+        db.delete(row)
+    db.flush()
 
     rebuild_feed_stock_snapshot(db=db)
 

@@ -32,8 +32,6 @@ from ...services.production_runtime import (
     sync_active_batch_progress,
     try_post_batch_stock)
 from ...services.stock import (
-    add_feed_produced,
-    add_rm_consumption,
     calculate_rm_consumption_quantity,
     collect_rm_shortages,
     format_rm_shortage_message,
@@ -142,6 +140,16 @@ def _parse_materials(raw_materials: object) -> list[dict]:
         if not isinstance(item, dict):
             raise ValueError(f"materials[{index}] must be an object")
 
+        raw_id = item.get("id")
+        material_id: int | None = None
+        if raw_id not in (None, ""):
+            try:
+                material_id = int(raw_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"materials[{index}].id must be an integer") from exc
+            if material_id <= 0:
+                raise ValueError(f"materials[{index}].id must be greater than 0")
+
         rm_name = str(item.get("rm_name") or "").strip()
         if not rm_name:
             raise ValueError(f"materials[{index}].rm_name is required")
@@ -153,7 +161,7 @@ def _parse_materials(raw_materials: object) -> list[dict]:
         if quantity <= 0:
             raise ValueError(f"materials[{index}].quantity must be greater than 0")
 
-        parsed.append({"rm_name": rm_name, "quantity": quantity})
+        parsed.append({"id": material_id, "rm_name": rm_name, "quantity": quantity})
     return parsed
 
 # Parses output bag metrics and validates required output fields.
@@ -558,23 +566,11 @@ def create_batch():
                     total_quantity=None)
                 db.add(row)
                 material_rows.append(row)
-                required_quantity = calculate_rm_consumption_quantity(
-                    material["quantity"],
-                    batch_size_value)
-                add_rm_consumption(
-                    db=db,
-                    rm_name=material["rm_name"],
-                    quantity=required_quantity,
-                    date=batch.date)
             db.flush()
 
-            add_feed_produced(
-                db=db,
-                feed_type=batch.product_name,
-                quantity=batch.output,
-                date=batch.date,
-                weight_per_bag=batch.weight_per_bag)
             batch.stock_posted = True
+            rebuild_rm_stock_ledger(db=db)
+            rebuild_feed_stock_ledger(db=db)
 
             response = serialize_batch(batch, has_report=False, is_active=False)
             response["materials"] = [serialize_batch_material(row) for row in material_rows]
@@ -845,7 +841,9 @@ def mark_batch_complete(batch_id: int):
             db=db,
             batch=batch)
 
-        try_post_batch_stock(db, batch=batch)
+        posted_now = try_post_batch_stock(db, batch=batch)
+        if posted_now:
+            rebuild_feed_stock_ledger(db=db)
         _refresh_material_total_quantity(db, batch=batch)
         has_report = (
             db.execute(select(ProductionReport).where(ProductionReport.batch_id == batch.id))
@@ -1116,17 +1114,40 @@ def update_batch_details(batch_id: int):
                     .scalars()
                     .all()
                 )
-                for row in existing_rows:
-                    db.delete(row)
-                db.flush()
+                existing_rows = sorted(existing_rows, key=lambda row: row.id)
+                existing_by_id = {row.id: row for row in existing_rows}
+                used_existing_ids: set[int] = set()
+
                 for item in parsed_materials:
-                    db.add(
-                        ProductionBatchMaterial(
-                            batch_id=batch.id,
-                            rm_name=item["rm_name"],
-                            quantity=item["quantity"],
-                            total_quantity=None)
-                    )
+                    target_row: ProductionBatchMaterial | None = None
+                    incoming_id = item.get("id")
+                    if isinstance(incoming_id, int):
+                        candidate = existing_by_id.get(incoming_id)
+                        if candidate is not None and candidate.id not in used_existing_ids:
+                            target_row = candidate
+
+                    if target_row is None and len(used_existing_ids) < len(existing_rows):
+                        # Fallback when client does not send IDs: preserve IDs by row order.
+                        for candidate in existing_rows:
+                            if candidate.id in used_existing_ids:
+                                continue
+                            target_row = candidate
+                            break
+
+                    if target_row is None:
+                        target_row = ProductionBatchMaterial(batch_id=batch.id)
+                        db.add(target_row)
+                    else:
+                        used_existing_ids.add(target_row.id)
+
+                    target_row.rm_name = item["rm_name"]
+                    target_row.quantity = item["quantity"]
+                    target_row.total_quantity = None
+
+                for row in existing_rows:
+                    if row.id in used_existing_ids:
+                        continue
+                    db.delete(row)
                 db.flush()
                 rm_stock_rebuild_required = True
                 batch_updated = True
@@ -1137,7 +1158,9 @@ def update_batch_details(batch_id: int):
             if batch_updated:
                 batch.last_modified_at = datetime.utcnow()
 
-            try_post_batch_stock(db, batch=batch)
+            posted_now = try_post_batch_stock(db, batch=batch)
+            if posted_now:
+                feed_stock_rebuild_required = True
             if feed_stock_rebuild_required:
                 rebuild_feed_stock_ledger(db=db)
             _refresh_material_total_quantity(db, batch=batch)

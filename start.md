@@ -25,3 +25,6 @@ git add .
 git commit -m "updated feature"
 git push
 git pull
+
+
+pip install fastapi uvicorn paho-mqtt

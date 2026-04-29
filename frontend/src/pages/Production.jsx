@@ -518,7 +518,9 @@ const filteredBatches = search.trim()
   const normalizedReportMaterials = reportMaterials.map((item) => {
     const rawQty = String(item.quantity ?? "").trim();
     const quantity = Number(item.quantity);
+    const parsedId = Number(item.id);
     return {
+      id: Number.isFinite(parsedId) && parsedId > 0 ? parsedId : undefined,
       rm_name: (item.rm_name || "").trim(),
       rawQty,
       quantity,
@@ -629,6 +631,7 @@ const filteredBatches = search.trim()
   const hydrateReportMaterials = (batchData, fallbackRecipeId) => {
     if (Array.isArray(batchData?.materials) && batchData.materials.length > 0) {
       return batchData.materials.map((material) => ({
+        id: material.id,
         rm_name: material.rm_name || "",
         quantity: String(material.quantity ?? ""),
       }));
@@ -961,6 +964,7 @@ const filteredBatches = search.trim()
       }
       payload.recipe_id = selectedRecipeForEdit.id;
       payload.materials = validReportMaterials.map((item) => ({
+        id: item.id,
         rm_name: item.rm_name,
         quantity: item.quantity,
       }));

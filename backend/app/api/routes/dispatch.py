@@ -3,7 +3,7 @@
 from ..fastapi_compat import Blueprint, Response, jsonify, request
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from ..common import (
         db_session,
@@ -18,7 +18,7 @@ from ...models.config import ProductType
 from ...models.dispatch import DispatchEntry, DispatchProduct
 from ...models.stock import FeedStock
 from ...services.id_codes import assign_dispatch_code
-from ...services.stock import add_feed_dispatched, rebuild_feed_stock_ledger
+from ...services.stock import rebuild_feed_stock_ledger
 from ...utils.export import (
     export_dispatch_entry_report_excel,
     export_dispatch_entry_report_pdf,
@@ -82,6 +82,7 @@ def _serialize_dispatch(entry: DispatchEntry) -> dict:
         "last_modified_at": dt(entry.last_modified_at),
         "products": [
             {
+                "id": p.id,
                 "product_type": p.product_type,
                 "num_bags": p.num_bags,
                 "weight_per_bag": p.weight_per_bag,
@@ -234,6 +235,16 @@ def _parse_dispatch_products(products: object) -> list[dict]:
         if not isinstance(item, dict):
             raise ValueError(f"products[{index}] must be an object")
 
+        raw_id = item.get("id")
+        product_id: int | None = None
+        if raw_id not in (None, ""):
+            try:
+                product_id = int(raw_id)
+            except (TypeError, ValueError):
+                raise ValueError(f"products[{index}].id must be an integer")
+            if product_id <= 0:
+                raise ValueError(f"products[{index}].id must be greater than 0")
+
         product_type = str(item.get("product_type") or "").strip()
         if not product_type:
             raise ValueError(f"products[{index}].product_type is required")
@@ -254,6 +265,7 @@ def _parse_dispatch_products(products: object) -> list[dict]:
 
         total_weight = num_bags * weight_per_bag
         parsed.append({
+            "id": product_id,
             "product_type": product_type,
             "num_bags": num_bags,
             "weight_per_bag": weight_per_bag,
@@ -320,15 +332,11 @@ def create_dispatch_entry():
                     weight_per_bag=prod["weight_per_bag"],
                     total_weight=prod["total_weight"])
                 db.add(product)
-                # Update stock ledger for each product
-                add_feed_dispatched(
-                    db=db,
-                    feed_type=prod["product_type"],
-                    quantity=prod["total_weight"],
-                    date=date + timedelta(hours=5, minutes=30),
-                    weight_per_bag=prod["weight_per_bag"])
 
             db.flush()
+            # Rebuild from source transactions so backdated dispatch cannot
+            # desynchronize later ledger openings or current stock.
+            rebuild_feed_stock_ledger(db=db)
             entry = _load_dispatch_entry_by_code(
                 db,
                 _serialize_dispatch_code(entry),
@@ -397,20 +405,46 @@ def update_dispatch_entry(dispatch_code: str):
             entry.price = price
             entry.last_modified_at = datetime.utcnow()
 
-            # Delete old products
-            for product in list(entry.products):
-                db.delete(product)
-            db.flush()
+            # Update products in-place to preserve IDs whenever possible.
+            existing_products = sorted(list(entry.products), key=lambda row: row.id)
+            existing_by_id = {row.id: row for row in existing_products}
+            used_existing_ids: set[int] = set()
 
-            # Add new products
-            for prod in products:
-                product = DispatchProduct(
-                    dispatch_entry=entry,
-                    product_type=prod["product_type"],
-                    num_bags=prod["num_bags"],
-                    weight_per_bag=prod["weight_per_bag"],
-                    total_weight=prod["total_weight"])
-                db.add(product)
+            for index, prod in enumerate(products):
+                target_row: DispatchProduct | None = None
+                incoming_id = prod.get("id")
+                if isinstance(incoming_id, int):
+                    candidate = existing_by_id.get(incoming_id)
+                    if candidate is not None and candidate.id not in used_existing_ids:
+                        target_row = candidate
+
+                if target_row is None and index < len(existing_products):
+                    candidate = existing_products[index]
+                    if candidate.id not in used_existing_ids:
+                        target_row = candidate
+
+                if target_row is None:
+                    for candidate in existing_products:
+                        if candidate.id in used_existing_ids:
+                            continue
+                        target_row = candidate
+                        break
+
+                if target_row is None:
+                    target_row = DispatchProduct(dispatch_entry=entry)
+                    db.add(target_row)
+                else:
+                    used_existing_ids.add(target_row.id)
+
+                target_row.product_type = prod["product_type"]
+                target_row.num_bags = prod["num_bags"]
+                target_row.weight_per_bag = prod["weight_per_bag"]
+                target_row.total_weight = prod["total_weight"]
+
+            for product in existing_products:
+                if product.id in used_existing_ids:
+                    continue
+                db.delete(product)
 
             db.flush()
             rebuild_feed_stock_ledger(db=db)

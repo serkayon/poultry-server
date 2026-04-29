@@ -414,6 +414,7 @@ useEffect(() => {
         pincode: row.pincode || '',
         vehicle_no: row.vehicle_no || '',
         products: (row.products || []).map(p => ({
+          id: p.id,
           product_type: p.product_type,
           num_bags: String(p.num_bags),
           weight_per_bag: String(p.weight_per_bag),
@@ -461,6 +462,7 @@ useEffect(() => {
           pincode: editForm.pincode,
           vehicle_no: editForm.vehicle_no,
           products: editForm.products.map(p => ({
+            id: p.id,
             product_type: p.product_type,
             num_bags: parseFloat(p.num_bags),
             weight_per_bag: parseFloat(p.weight_per_bag),

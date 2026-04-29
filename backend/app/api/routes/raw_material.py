@@ -20,7 +20,7 @@ from ...models.production import ProductionBatchMaterial
 from ...models.raw_material import RawMaterialEntry, RawMaterialLabReport, RawMaterialType
 from ...services.id_codes import assign_raw_material_entry_code
 from ...models.stock import RMStockLedger, RawMaterialStock
-from ...services.stock import add_rm_received, rebuild_rm_stock_ledger
+from ...services.stock import rebuild_rm_stock_ledger
 from ...utils.export import (
     export_raw_material_entry_report_excel,
     export_raw_material_entry_report_pdf,
@@ -407,11 +407,9 @@ def create_raw_material_entry():
             assign_raw_material_entry_code(db, entry)
             db.flush()
             db.refresh(entry)
-            add_rm_received(
-                db=db,
-                rm_name=entry.rm_type,
-                quantity=float(entry.total_weight or 0),
-                date=entry.date)
+            # Rebuild after every insert so backdated entries cannot leave
+            # future-day openings/current snapshot out of sync.
+            rebuild_rm_stock_ledger(db=db)
             return jsonify(serialize_raw_entry(entry, has_lab=False))
     except ValueError as exc:
         return error(str(exc))
