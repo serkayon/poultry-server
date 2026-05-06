@@ -14,9 +14,9 @@ from ..common import (
     resolve_period_range,
     required,
     dt)
-from ...models.config import ProductType
-from ...models.dispatch import DispatchEntry, DispatchProduct
-from ...models.stock import FeedStock
+from app.models.config import ProductType
+from app.models.dispatch import DispatchEntry, DispatchProduct
+from app.models.stock import FeedStock
 from ...services.id_codes import assign_dispatch_code
 from ...services.stock import rebuild_feed_stock_ledger
 from ...utils.export import (
@@ -609,4 +609,5 @@ def download_invoice(dispatch_code: str):
             headers={"Content-Disposition": f"attachment; filename=invoice_{dispatch_code}.pdf"})
     except Exception as exc:
         return error(f"Failed to generate invoice: {str(exc)}")
+
 

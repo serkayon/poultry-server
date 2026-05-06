@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models.plc import MachineState
-from ..models.production import ProductionBatch, ProductionBatchMaterial
+from app.models.plc import MachineState
+from app.models.production import ProductionBatch, ProductionBatchMaterial
 from .stock import (
     add_feed_produced,
     collect_rm_shortages,
@@ -79,6 +79,9 @@ def try_post_batch_stock(db: Session, *, batch: ProductionBatch) -> bool:
         weight_per_bag=batch.weight_per_bag)
     batch.stock_posted = True
     batch.last_modified_at = datetime.utcnow()
+    # Session is configured with autoflush=False; force persistence so
+    # subsequent ledger rebuild queries see stock_posted=True immediately.
+    db.flush()
     return True
 
 
@@ -169,10 +172,15 @@ def finalize_batch_runtime_state(
     warning_detail = finalize_batch_consumption_state(
         db=db,
         batch=batch)
+    batch.rm_reduced = warning_detail is None
+    # Session is configured with autoflush=False; flush runtime flags before
+    # rebuilding ledgers that query ProductionBatch rows.
+    db.flush()
     try:
         rebuild_rm_stock_ledger(db=db)
     except ValueError as exc:
         batch.hmi_status = RUN_STATUS_STOPPED
+        batch.rm_reduced = False
         batch.rm_shortage_flag = True
         if warning_detail:
             batch.rm_shortage_detail = f"{warning_detail}\n{exc}"
@@ -237,3 +245,4 @@ def sync_active_batch_progress(
         machine_state.updated_at = now
 
     return batch
+

@@ -2,7 +2,7 @@ from sqlalchemy import Boolean, DateTime, Float, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime
 
-from ..db import Base
+from ..connection import Base
 
 
 # Real-time PLC data (Modbus) - written by cloud/Modbus team; we only read via API.

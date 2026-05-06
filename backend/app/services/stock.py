@@ -6,10 +6,10 @@ from typing import Mapping, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models.dispatch import DispatchEntry, DispatchProduct
-from ..models.production import ProductionBatch, ProductionBatchMaterial
-from ..models.raw_material import RawMaterialEntry
-from ..models.stock import FeedStock, FeedStockCurrent, RMStockLedger, RawMaterialStock
+from app.models.dispatch import DispatchEntry, DispatchProduct
+from app.models.production import ProductionBatch, ProductionBatchMaterial
+from app.models.raw_material import RawMaterialEntry
+from app.models.stock import FeedStock, FeedStockCurrent, RMStockLedger, RawMaterialStock
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
 
@@ -724,9 +724,10 @@ def rebuild_rm_stock_ledger(db: Session) -> None:
                 ProductionBatch.batch_size,
                 ProductionBatch.hmi_completed_count,
                 ProductionBatch.hmi_status,
-                ProductionBatch.rm_shortage_flag)
+                ProductionBatch.rm_shortage_flag,
+                ProductionBatch.rm_reduced)
             .join(ProductionBatch, ProductionBatch.id == ProductionBatchMaterial.batch_id)
-            
+            .where(ProductionBatch.rm_reduced.is_(True))
             .order_by(
                 ProductionBatch.date.asc(),
                 ProductionBatch.id.asc(),
@@ -742,7 +743,10 @@ def rebuild_rm_stock_ledger(db: Session) -> None:
         batch_size,
         hmi_completed_count,
         hmi_status,
-        rm_shortage_flag) in consumption_rows:
+        rm_shortage_flag,
+        rm_reduced) in consumption_rows:
+        if not bool(rm_reduced):
+            continue
         effective_count = resolve_effective_batch_run_count(
             batch_size=batch_size,
             hmi_completed_count=hmi_completed_count,
@@ -1064,3 +1068,4 @@ def rebuild_feed_stock_snapshot(db: Session) -> None:
         row.last_modified_at = now
 
     db.flush()
+

@@ -1,6 +1,6 @@
 import React from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { AuthProvider } from './context/AuthContext'
+import { AuthProvider, useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import RawMaterial from './pages/RawMaterial'
@@ -65,24 +65,56 @@ export default function App() {
 
   return (
     <AuthProvider>
-      <>
-        <Routes>
-            <Route path="/" element={<ClientLogin />} />
-          <Route path="/layout" element={<Layout />}>
-            <Route index element={<Dashboard />} />
-            <Route path="raw-material" element={<RawMaterial />} />
-            <Route path="dispatch" element={<Dispatch />} />
-            <Route path="production" element={<Production />} />
-            <Route path="stock" element={<Stock />} />
-            <Route path="settings" element={<Settings />} />
-              
-
-          </Route>
-             {/* <Route path="login" element={<ClientLogin />} /> */}
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-        {shouldMonitorBackend && !isBackendReachable && <ServerMaintenanceOverlay />}
-      </>
+      <AppRoutes
+        isBackendReachable={isBackendReachable}
+        shouldMonitorBackend={shouldMonitorBackend}
+      />
     </AuthProvider>
+  )
+}
+
+function RequireAuth({ children }) {
+  const { isAuthenticated } = useAuth()
+  if (!isAuthenticated) return <Navigate to="/" replace />
+  return children
+}
+
+function PublicOnly({ children }) {
+  const { isAuthenticated } = useAuth()
+  if (isAuthenticated) return <Navigate to="/layout" replace />
+  return children
+}
+
+function AppRoutes({ isBackendReachable, shouldMonitorBackend }) {
+  return (
+    <>
+      <Routes>
+        <Route
+          path="/"
+          element={(
+            <PublicOnly>
+              <ClientLogin />
+            </PublicOnly>
+          )}
+        />
+        <Route
+          path="/layout"
+          element={(
+            <RequireAuth>
+              <Layout />
+            </RequireAuth>
+          )}
+        >
+          <Route index element={<Dashboard />} />
+          <Route path="raw-material" element={<RawMaterial />} />
+          <Route path="dispatch" element={<Dispatch />} />
+          <Route path="production" element={<Production />} />
+          <Route path="stock" element={<Stock />} />
+          <Route path="settings" element={<Settings />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+      {shouldMonitorBackend && !isBackendReachable && <ServerMaintenanceOverlay />}
+    </>
   )
 }

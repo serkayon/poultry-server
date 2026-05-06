@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
@@ -15,6 +16,7 @@ class Settings(BaseSettings):
     # Default local PostgreSQL database named `poultry`.
     # Override via DATABASE_URL in backend/app/.env if needed.
     database_url: str = "postgresql+psycopg://postgres@localhost:5432/poultry"
+    db_schema: str = "poultry1"
 
     # Parse debug flag.
 
@@ -34,7 +36,7 @@ class Settings(BaseSettings):
     # Define Config.
 
     class Config:
-        env_file = ".env"
+        env_file = Path(__file__).resolve().parent / ".env"
 
 
 # Get settings.
@@ -42,3 +44,4 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+

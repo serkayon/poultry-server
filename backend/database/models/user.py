@@ -6,7 +6,7 @@ import enum
 import hashlib
 import os
 
-from ..db import Base
+from ..connection import Base
 
 
 # Define UserRole.

@@ -266,15 +266,15 @@ useEffect(() => {
     }
 
     const getBagWeightOptionsForProduct = (productType) => {
-      const normalizedType = String(productType || '').trim().toLowerCase()
-      if (!normalizedType) return []
+      const selectedType = String(productType || '').trim()
+      if (!selectedType) return []
 
       const seen = new Set()
       const options = []
       availableFeedStock.forEach((row) => {
-        const rowType = String(row?.feed_type || '').trim().toLowerCase()
+        const rowType = String(row?.feed_type || '').trim()
         const bagWeight = Number(row?.bag_weight_kg)
-        if (rowType !== normalizedType || !Number.isFinite(bagWeight) || bagWeight <= 0) return
+        if (rowType !== selectedType || !Number.isFinite(bagWeight) || bagWeight <= 0) return
         const normalizedWeight = formatBagWeightOption(bagWeight)
         if (!normalizedWeight || seen.has(normalizedWeight)) return
         seen.add(normalizedWeight)
@@ -820,8 +820,8 @@ const resetEditModal = () => {
                       <thead>
                         <tr className="bg-gray-200 text-gray-700">
                           <th className="px-3 py-2 text-left border-b border-gray-300">Product Variant</th>
-                          <th className="px-3 py-2 text-right border-b border-gray-300">Bag Weight (kg)</th>
                           <th className="px-3 py-2 text-right border-b border-gray-300">No. of Bags Available</th>
+                          <th className="px-3 py-2 text-right border-b border-gray-300">Weight/Bag</th>
                           <th className="px-3 py-2 text-right border-b border-gray-300">Weight Available (kg)</th>
                         </tr>
                       </thead>
@@ -829,8 +829,8 @@ const resetEditModal = () => {
                         {availableFeedStock.map((row) => (
                           <tr key={`available-stock-${row.feed_variant}-${row.bag_weight_kg ?? 'na'}`} className="bg-gray-50 text-gray-700 border-b border-gray-200 last:border-b-0">
                             <td className="px-3 py-2">{row.feed_variant}</td>
-                            <td className="px-3 py-2 text-right">{row.bag_weight_kg == null ? 'N/A' : row.bag_weight_kg.toFixed(2)}</td>
                             <td className="px-3 py-2 text-right">{row.available_bags == null ? 'N/A' : row.available_bags.toFixed(2)}</td>
+                            <td className="px-3 py-2 text-right">{row.bag_weight_kg == null ? 'N/A' : `${formatBagWeightOption(row.bag_weight_kg)}/bag`}</td>
                             <td className="px-3 py-2 text-right font-medium">{row.quantity.toFixed(2)}</td>
                           </tr>
                         ))}
@@ -1062,8 +1062,8 @@ const resetEditModal = () => {
                       <thead>
                         <tr className="bg-gray-200 text-gray-700">
                           <th className="px-3 py-2 text-left border-b border-gray-300">Product Variant</th>
-                          <th className="px-3 py-2 text-right border-b border-gray-300">Bag Weight (kg)</th>
                           <th className="px-3 py-2 text-right border-b border-gray-300">No. of Bags Available</th>
+                          <th className="px-3 py-2 text-right border-b border-gray-300">Weight/Bag</th>
                           <th className="px-3 py-2 text-right border-b border-gray-300">Weight Available (kg)</th>
                         </tr>
                       </thead>
@@ -1071,8 +1071,8 @@ const resetEditModal = () => {
                         {availableFeedStock.map((row) => (
                           <tr key={`available-stock-edit-${row.feed_variant}-${row.bag_weight_kg ?? 'na'}`} className="bg-gray-50 text-gray-700 border-b border-gray-200 last:border-b-0">
                             <td className="px-3 py-2">{row.feed_variant}</td>
-                            <td className="px-3 py-2 text-right">{row.bag_weight_kg == null ? 'N/A' : row.bag_weight_kg.toFixed(2)}</td>
                             <td className="px-3 py-2 text-right">{row.available_bags == null ? 'N/A' : row.available_bags.toFixed(2)}</td>
+                            <td className="px-3 py-2 text-right">{row.bag_weight_kg == null ? 'N/A' : `${formatBagWeightOption(row.bag_weight_kg)}/bag`}</td>
                             <td className="px-3 py-2 text-right font-medium">{row.quantity.toFixed(2)}</td>
                           </tr>
                         ))}

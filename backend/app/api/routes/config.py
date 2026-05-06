@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from ..common import db_session, dt, error, json_body
-from ...models.config import ProductType, Recipe, RecipeMaterial
+from app.models.config import ProductType, Recipe, RecipeMaterial
 
 config_bp = Blueprint("config", __name__, url_prefix="/api/config")
 
@@ -239,14 +239,11 @@ def add_recipe():
         recipe = Recipe(id=recipe_id, name=name)
         db.add(recipe)
         db.flush()
-        now = datetime.utcnow()
-
         for item in materials:
             material = RecipeMaterial(
                 recipe_id=recipe.id,
                 rm_name=item["rm_name"],
                 quantity=item["quantity"],
-                last_modified_at=now,
             )
             db.add(material)
         db.flush()
@@ -312,7 +309,15 @@ def update_recipe(recipe_id: int):
         if existing_recipe:
             return error("Recipe name already exists")
 
-        now = datetime.utcnow()
+        now: datetime | None = None
+        recipe_changed = False
+
+        def _now() -> datetime:
+            nonlocal now
+            if now is None:
+                now = datetime.utcnow()
+            return now
+
         existing_materials = list(recipe.materials)
         existing_by_name = {
             str(row.rm_name or "").strip().lower(): row
@@ -323,8 +328,10 @@ def update_recipe(recipe_id: int):
             recipe.id = new_recipe_id
             for row in existing_materials:
                 row.recipe_id = new_recipe_id
-        recipe.name = name
-        recipe.last_modified_at = now
+            recipe_changed = True
+        if recipe.name != name:
+            recipe.name = name
+            recipe_changed = True
 
         incoming_by_name = {
             str(item["rm_name"]).strip().lower(): item
@@ -335,6 +342,7 @@ def update_recipe(recipe_id: int):
         for key, row in existing_by_name.items():
             if key not in incoming_by_name:
                 db.delete(row)
+                recipe_changed = True
 
         # Update existing materials in-place to preserve created_at and track edits.
         for key, item in incoming_by_name.items():
@@ -345,9 +353,9 @@ def update_recipe(recipe_id: int):
                         recipe_id=recipe.id,
                         rm_name=item["rm_name"],
                         quantity=item["quantity"],
-                        last_modified_at=now,
                     )
                 )
+                recipe_changed = True
                 continue
 
             has_change = False
@@ -358,7 +366,10 @@ def update_recipe(recipe_id: int):
                 existing_row.quantity = item["quantity"]
                 has_change = True
             if has_change:
-                existing_row.last_modified_at = now
+                existing_row.last_modified_at = _now()
+                recipe_changed = True
+        if recipe_changed:
+            recipe.last_modified_at = _now()
         db.flush()
 
         if add_to_product_type:
@@ -392,3 +403,4 @@ def delete_recipe(recipe_id: int):
 
         db.flush()
         return jsonify({"id": recipe_id, "deleted": True})
+

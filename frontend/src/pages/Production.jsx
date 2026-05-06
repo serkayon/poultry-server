@@ -569,17 +569,39 @@ const filteredBatches = search.trim()
     return matchedType ? String(matchedType).trim() : "";
   };
 
+  const parseRecipeIdFromReference = (recipeReference) => {
+    const refText = String(recipeReference ?? "").trim();
+    if (!refText) {
+      return null;
+    }
+    if (/^\d+$/.test(refText)) {
+      const asNumber = Number(refText);
+      return Number.isFinite(asNumber) && asNumber > 0 ? asNumber : null;
+    }
+    const fallbackMatch = refText.match(/^recipe\s*#?\s*(\d+)$/i);
+    if (!fallbackMatch) {
+      return null;
+    }
+    const fallbackId = Number(fallbackMatch[1]);
+    return Number.isFinite(fallbackId) && fallbackId > 0 ? fallbackId : null;
+  };
+
   const hydrateReportForm = (batch, reportData) => {
     const next = initialReportForm(batch);
     next.product_name =
       resolveMatchingProductTypeName(batch?.product_name) ||
       resolveMatchingProductTypeName(batch?.recipe_type);
-    const recipeReference = batch?.recipe_type ?? batch?.recipe_id ?? null;
+    const recipeReference = batch?.recipe_id ?? batch?.recipe_type ?? null;
+    const parsedRecipeId = parseRecipeIdFromReference(recipeReference);
     const matchedRecipe = recipeReference
       ? recipes.find((item) => {
           const itemName = String(item.name || "").trim();
           const refText = String(recipeReference).trim();
-          return itemName === refText || Number(item.id) === Number(recipeReference);
+          return (
+            itemName === refText ||
+            Number(item.id) === Number(recipeReference) ||
+            (parsedRecipeId != null && Number(item.id) === parsedRecipeId)
+          );
         }) || null
       : null;
     if (matchedRecipe?.id != null) {
@@ -601,9 +623,11 @@ const filteredBatches = search.trim()
     if (!refText) {
       return null;
     }
-    const refNumber = Number(refText);
-    if (Number.isFinite(refNumber)) {
-      const byId = recipes.find((item) => Number(item.id) === Number(refNumber)) || null;
+    const parsedRecipeId = parseRecipeIdFromReference(recipeReference);
+    if (parsedRecipeId != null) {
+      const byId =
+        recipes.find((item) => Number(item.id) === Number(parsedRecipeId)) ||
+        null;
       if (byId) {
         return byId;
       }
@@ -673,6 +697,110 @@ const filteredBatches = search.trim()
     setShowReport(true);
   };
 
+  const buildEditDetailsPayload = () => {
+    const enteredDate = String(reportForm.date || "").trim();
+    const originalDateTime = String(reportModalBatch?.date || "").trim();
+    const originalDateInput = toDateInputIST(originalDateTime, "");
+    const datePayload =
+      enteredDate && originalDateTime && enteredDate === originalDateInput
+        ? originalDateTime
+        : toApiDateTimeFromDateInput(enteredDate) || enteredDate;
+
+    const payload = {
+      date: datePayload,
+      batch_no: String(reportForm.batch_no || "").trim(),
+      product_name:
+        resolveMatchingProductTypeName(reportForm.product_name) ||
+        resolveMatchingProductTypeName(selectedRecipeForEdit?.name) ||
+        resolveMatchingProductTypeName(reportModalBatch?.product_name),
+      batch_size: reportForm.batch_size,
+      mop: reportForm.mop,
+      water: reportForm.water,
+    };
+
+    if (!payload.date) {
+      return { payload: null, error: "Date is required." };
+    }
+    if (!payload.batch_no) {
+      return { payload: null, error: "Batch No is required." };
+    }
+    if (!payload.product_name) {
+      return { payload: null, error: "Product Type is required." };
+    }
+    if (!selectedRecipeForEdit) {
+      return { payload: null, error: "Select a recipe for raw material production." };
+    }
+    if (invalidReportMaterialRows.length > 0) {
+      return {
+        payload: null,
+        error: "Each material row must include name and weight greater than 0.",
+      };
+    }
+    if (validReportMaterials.length === 0) {
+      return { payload: null, error: "Add at least one valid material row." };
+    }
+
+    payload.recipe_id = selectedRecipeForEdit.id;
+    payload.materials = validReportMaterials.map((item) => ({
+      id: item.id,
+      rm_name: item.rm_name,
+      quantity: item.quantity,
+    }));
+
+    const parsedBatchSize = parseFloat(payload.batch_size);
+    if (!Number.isFinite(parsedBatchSize) || parsedBatchSize <= 0) {
+      return { payload: null, error: "Batch Count must be greater than 0." };
+    }
+    payload.batch_size = parsedBatchSize;
+
+    if (payload.mop !== "") {
+      const parsedMop = parseFloat(payload.mop);
+      if (!Number.isFinite(parsedMop)) {
+        return { payload: null, error: "MOP must be a valid number." };
+      }
+      payload.mop = parsedMop;
+    } else {
+      payload.mop = null;
+    }
+
+    if (payload.water !== "") {
+      const parsedWater = parseFloat(payload.water);
+      if (!Number.isFinite(parsedWater)) {
+        return { payload: null, error: "Water must be a valid number." };
+      }
+      payload.water = parsedWater;
+    } else {
+      payload.water = null;
+    }
+
+    const numBagsRaw = String(reportForm.num_bags ?? "").trim();
+    const weightRaw = String(reportForm.weight_per_bag ?? "").trim();
+    const wantsBagUpdate = numBagsRaw !== "" || weightRaw !== "";
+    if (wantsBagUpdate) {
+      if (!numBagsRaw || !weightRaw) {
+        return {
+          payload: null,
+          error: "Enter both Number of Bags and Weight per Bag.",
+        };
+      }
+
+      const parsedNumBags = parseFloat(numBagsRaw);
+      if (!Number.isFinite(parsedNumBags) || parsedNumBags <= 0) {
+        return { payload: null, error: "Number of bags must be greater than 0." };
+      }
+      payload.num_bags = parsedNumBags;
+
+      const parsedWeightPerBag = parseFloat(weightRaw);
+      if (!Number.isFinite(parsedWeightPerBag) || parsedWeightPerBag <= 0) {
+        return { payload: null, error: "Weight per bag must be greater than 0." };
+      }
+      payload.weight_per_bag = parsedWeightPerBag;
+      payload.output = parsedNumBags * parsedWeightPerBag;
+    }
+
+    return { payload, error: "" };
+  };
+
   const handleMarkBatchComplete = async () => {
     const batchId =
       reportModalBatch?.id || selectedBatch?.id || reportForm.batch_id;
@@ -694,6 +822,15 @@ const filteredBatches = search.trim()
     setReportError("");
     setMarkCompleteLoading(true);
     try {
+      if (reportModalMode === "edit") {
+        const { payload, error } = buildEditDetailsPayload();
+        if (error) {
+          setReportError(error);
+          return;
+        }
+        await productionApi.updateBatchDetails(batchId, payload);
+      }
+
       const { data } = await productionApi.markBatchComplete(batchId);
       const updatedBatch = data?.batch || null;
       if (updatedBatch) {
@@ -714,7 +851,7 @@ const filteredBatches = search.trim()
         setSuccessMsg("Batch marked as complete with stock warning.");
       } else {
         setSuccessMsg(
-          "Batch marked as complete. You can now enter bag details.",
+          "Batch marked as complete and stock ledgers updated.",
         );
       }
     } catch (err) {
@@ -732,7 +869,28 @@ const filteredBatches = search.trim()
 
   const handleReportRecipeChange = (value) => {
     const recipeId = value ? Number(value) : null;
-    setReportForm((prev) => ({ ...prev, recipe_id: recipeId }));
+    const selectedRecipe =
+      recipes.find((item) => Number(item.id) === Number(recipeId)) || null;
+    const matchedProductType = resolveMatchingProductTypeName(
+      selectedRecipe?.name,
+    );
+    setReportForm((prev) => {
+      const previousRecipe =
+        recipes.find((item) => Number(item.id) === Number(prev.recipe_id)) ||
+        null;
+      const previousRecipeName = String(previousRecipe?.name || "").trim();
+      const currentProductName = String(prev.product_name || "").trim();
+      const shouldClearUnmatched =
+        !matchedProductType &&
+        (!currentProductName || currentProductName === previousRecipeName);
+
+      return {
+        ...prev,
+        recipe_id: recipeId,
+        product_name:
+          matchedProductType || (shouldClearUnmatched ? "" : prev.product_name),
+      };
+    });
     setReportMaterials(recipeMaterialsForRecipeId(recipeId));
   };
 
@@ -916,115 +1074,10 @@ const filteredBatches = search.trim()
     }
 
     if (reportModalMode === "edit") {
-      const enteredDate = String(reportForm.date || "").trim();
-      const originalDateTime = String(reportModalBatch?.date || "").trim();
-      const originalDateInput = toDateInputIST(originalDateTime, "");
-      const datePayload =
-        enteredDate &&
-        originalDateTime &&
-        enteredDate === originalDateInput
-          ? originalDateTime
-          : toApiDateTimeFromDateInput(enteredDate) || enteredDate;
-
-      const payload = {
-        date: datePayload,
-        batch_no: String(reportForm.batch_no || "").trim(),
-        product_name: String(reportForm.product_name || "").trim(),
-        batch_size: reportForm.batch_size,
-        mop: reportForm.mop,
-        water: reportForm.water,
-      };
-
-      if (!payload.date) {
-        setReportError("Date is required.");
+      const { payload, error } = buildEditDetailsPayload();
+      if (error) {
+        setReportError(error);
         return;
-      }
-      if (!payload.batch_no) {
-        setReportError("Batch No is required.");
-        return;
-      }
-      if (!payload.product_name) {
-        setReportError("Product Type is required.");
-        return;
-      }
-      if (!selectedRecipeForEdit) {
-        setReportError("Select a recipe for raw material production.");
-        return;
-      }
-
-      if (invalidReportMaterialRows.length > 0) {
-        setReportError(
-          "Each material row must include name and weight greater than 0.",
-        );
-        return;
-      }
-      if (validReportMaterials.length === 0) {
-        setReportError("Add at least one valid material row.");
-        return;
-      }
-      payload.recipe_id = selectedRecipeForEdit.id;
-      payload.materials = validReportMaterials.map((item) => ({
-        id: item.id,
-        rm_name: item.rm_name,
-        quantity: item.quantity,
-      }));
-
-      const parsedBatchSize = parseFloat(payload.batch_size);
-      if (!Number.isFinite(parsedBatchSize) || parsedBatchSize <= 0) {
-        setReportError("Batch Count must be greater than 0.");
-        return;
-      }
-      payload.batch_size = parsedBatchSize;
-
-      if (payload.mop !== "") {
-        const parsedMop = parseFloat(payload.mop);
-        if (!Number.isFinite(parsedMop)) {
-          setReportError("MOP must be a valid number.");
-          return;
-        }
-        payload.mop = parsedMop;
-      } else {
-        payload.mop = null;
-      }
-
-      if (payload.water !== "") {
-        const parsedWater = parseFloat(payload.water);
-        if (!Number.isFinite(parsedWater)) {
-          setReportError("Water must be a valid number.");
-          return;
-        }
-        payload.water = parsedWater;
-      } else {
-        payload.water = null;
-      }
-
-      const numBagsRaw = String(reportForm.num_bags ?? "").trim();
-      const weightRaw = String(reportForm.weight_per_bag ?? "").trim();
-      const wantsBagUpdate = numBagsRaw !== "" || weightRaw !== "";
-      if (wantsBagUpdate) {
-        if (!numBagsRaw || !weightRaw) {
-          setReportError("Enter both Number of Bags and Weight per Bag.");
-          return;
-        }
-
-        const parsedNumBags = parseFloat(numBagsRaw);
-        if (!Number.isFinite(parsedNumBags) || parsedNumBags <= 0) {
-          setReportError("Number of bags must be greater than 0.");
-          return;
-        }
-        payload.num_bags = parsedNumBags;
-
-        const parsedWeightPerBag = parseFloat(weightRaw);
-        if (!Number.isFinite(parsedWeightPerBag) || parsedWeightPerBag <= 0) {
-          setReportError("Weight per bag must be greater than 0.");
-          return;
-        }
-        payload.weight_per_bag = parsedWeightPerBag;
-        payload.output = parsedNumBags * parsedWeightPerBag;
-      } else {
-        delete payload.num_bags;
-        delete payload.weight_per_bag;
-        delete payload.output;
       }
 
       try {
@@ -2469,7 +2522,7 @@ const filteredBatches = search.trim()
               )}
               <p className="text-xs text-black mb-2">Batch Details</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
+                <div className="disabled pointer-events-none">
                   <label className="block text-xs text-black mb-0.5">
                     Date
                   </label>
@@ -2479,8 +2532,8 @@ const filteredBatches = search.trim()
                     onChange={(e) =>
                       setReportForm((f) => ({ ...f, date: e.target.value }))
                     }
-                    className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm"
-                    required
+                    className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm disabled:bg-gray-100 pointer-events-none"
+                    disabled  
                   />
                 </div>
                 <div>
@@ -2497,7 +2550,27 @@ const filteredBatches = search.trim()
                     required
                   />
                 </div>
+             
                 <div>
+                  <label className="block text-xs text-black mb-0.5">
+                    Batch Count
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    min="0"
+                    value={reportForm.batch_size || ""}
+                    onChange={(e) =>
+                      setReportForm((f) => ({
+                        ...f,
+                        batch_size: e.target.value,
+                      }))
+                    }
+                    className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm"
+                    required
+                  />
+                </div>
+                   <div>
                   <label className="block text-xs text-black mb-0.5">
                     Recipe
                   </label>
@@ -2524,7 +2597,36 @@ const filteredBatches = search.trim()
                     })}
                   </select>
                 </div>
+           
                 <div>
+                  <label className="block text-xs text-black mb-0.5">MOP</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={reportForm.mop || ""}
+                    onChange={(e) =>
+                      setReportForm((f) => ({ ...f, mop: e.target.value }))
+                    }
+                    className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-black mb-0.5">
+                    Water
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={reportForm.water || ""}  
+                    onChange={(e) =>
+                      setReportForm((f) => ({ ...f, water: e.target.value }))
+                    }
+                    className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm"
+                  />
+                </div>
+                 </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-5">
+                     <div>
                   <label className="block text-xs text-black mb-0.5">
                     Product Type
                   </label>
@@ -2548,51 +2650,6 @@ const filteredBatches = search.trim()
                       );
                     })}
                   </select>
-                </div>
-                <div>
-                  <label className="block text-xs text-black mb-0.5">
-                    Batch Count
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    min="0"
-                    value={reportForm.batch_size || ""}
-                    onChange={(e) =>
-                      setReportForm((f) => ({
-                        ...f,
-                        batch_size: e.target.value,
-                      }))
-                    }
-                    className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-black mb-0.5">MOP</label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={reportForm.mop || ""}
-                    onChange={(e) =>
-                      setReportForm((f) => ({ ...f, mop: e.target.value }))
-                    }
-                    className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-black mb-0.5">
-                    Water
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={reportForm.water || ""}
-                    onChange={(e) =>
-                      setReportForm((f) => ({ ...f, water: e.target.value }))
-                    }
-                    className="w-full px-2 py-1.5 rounded bg-primary-light border border-gray-600 text-black text-sm"
-                  />
                 </div>
                 <div>
                   <label className="block text-xs text-black mb-0.5">

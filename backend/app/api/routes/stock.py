@@ -10,8 +10,9 @@ from ..common import (
     error,
     parse_datetime,
     resolve_period_range)
-from ...models.raw_material import RawMaterialType
-from ...models.stock import FeedStock, FeedStockCurrent, RMStockLedger, RawMaterialStock
+from app.models.config import ProductType
+from app.models.raw_material import RawMaterialType
+from app.models.stock import FeedStock, FeedStockCurrent, RMStockLedger, RawMaterialStock
 from ...utils.export import (
     export_feed_individual_stock_report_excel,
     export_feed_individual_stock_report_pdf,
@@ -113,6 +114,11 @@ def _current_rm_stock_payload(db) -> list[dict]:
 # Build the current feed stock payload.
 
 def _current_feed_stock_payload(db) -> list[dict]:
+    feed_types = (
+        db.execute(select(ProductType).order_by(ProductType.name.asc()))
+        .scalars()
+        .all()
+    )
     current_rows = (
         db.execute(
             select(FeedStockCurrent)
@@ -137,9 +143,17 @@ def _current_feed_stock_payload(db) -> list[dict]:
             continue
         latest_by_variant[key] = row
 
+    ordered_feed_types = [item.name for item in feed_types]
+    known_feed_types = set(ordered_feed_types)
+    present_feed_types: set[str] = set()
+
     payload = []
     for (feed_type, bag_weight_grams), row in latest_by_variant.items():
         quantity = float(row.quantity or 0)
+        present_feed_types.add(feed_type)
+        if feed_type not in known_feed_types:
+            ordered_feed_types.append(feed_type)
+            known_feed_types.add(feed_type)
         payload.append(
             {
                 "date": dt(row.last_modified_at or row.created_at) if row else None,
@@ -148,6 +162,20 @@ def _current_feed_stock_payload(db) -> list[dict]:
                 "feed_variant": _feed_variant_name(feed_type, bag_weight_grams),
                 "quantity": quantity,
                 "closing_stock": quantity,
+            }
+        )
+
+    for feed_type in ordered_feed_types:
+        if feed_type in present_feed_types:
+            continue
+        payload.append(
+            {
+                "date": None,
+                "feed_type": feed_type,
+                "bag_weight_kg": None,
+                "feed_variant": _feed_variant_name(feed_type, None),
+                "quantity": 0.0,
+                "closing_stock": 0.0,
             }
         )
     return payload
@@ -511,3 +539,4 @@ def download_overall_stock():
         export_overall_stock_report_pdf(sections),
         mimetype="application/pdf",
         headers={"Content-Disposition": "attachment; filename=overall_stock_report.pdf"})
+

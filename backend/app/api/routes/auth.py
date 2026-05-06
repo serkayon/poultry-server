@@ -15,8 +15,13 @@ from ..common import (
     serialize_user,
     token_response,
 )
-from ...models.user import User, UserRole
-from ...services.auth import get_user_by_email, hash_password, verify_password
+from app.models.user import User, UserRole
+from ...services.auth import (
+    get_user_by_email,
+    hash_password,
+    is_password_hashed,
+    verify_password,
+)
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 PIN_RE = re.compile(r"^\d{4}$")
@@ -29,6 +34,33 @@ PIN_TYPE_FIELD_MAP = {
     "production_report_access": "pin_production_report_access_hash",
     "recipe_access": "pin_recipe_access_hash",
 }
+DEFAULT_PIN = "1234"
+
+
+def _build_default_pin_hashes() -> dict[str, str]:
+    return {
+        "settings_pin_hash": hash_password(DEFAULT_PIN),
+        "pin_rm_entry_edit_hash": hash_password(DEFAULT_PIN),
+        "pin_rm_lab_edit_hash": hash_password(DEFAULT_PIN),
+        "pin_dispatch_edit_hash": hash_password(DEFAULT_PIN),
+        "pin_production_details_edit_hash": hash_password(DEFAULT_PIN),
+        "pin_production_report_access_hash": hash_password(DEFAULT_PIN),
+        "pin_recipe_access_hash": hash_password(DEFAULT_PIN),
+    }
+
+
+def _upgrade_user_pin_hashes(user: User) -> bool:
+    changed = False
+    for pin_field in PIN_TYPE_FIELD_MAP.values():
+        stored_pin_value = str(getattr(user, pin_field, "") or "").strip()
+        if not stored_pin_value:
+            setattr(user, pin_field, hash_password(DEFAULT_PIN))
+            changed = True
+            continue
+        if not is_password_hashed(stored_pin_value):
+            setattr(user, pin_field, hash_password(stored_pin_value))
+            changed = True
+    return changed
 
 
 # Normalize a PIN scope value into one of the supported types.
@@ -75,9 +107,14 @@ def auth_login():
             return error("Invalid email or password", 401)
         if not user.is_active:
             return error("Account disabled", 401)
-        # Normalize legacy hashed passwords into plain text storage after valid login.
-        if str(user.password or "") != str(password):
-            user.password = str(password)
+        should_flush = False
+        # Upgrade legacy/plain passwords to current hashed format after successful auth.
+        if not is_password_hashed(user.password):
+            user.password = hash_password(password)
+            should_flush = True
+        if _upgrade_user_pin_hashes(user):
+            should_flush = True
+        if should_flush:
             db.flush()
         return jsonify(token_response(user))
 
@@ -102,13 +139,7 @@ def vendor_signup():
         user = User(
             email=email,
             password=hash_password(password),
-            settings_pin_hash="1234",
-            pin_rm_entry_edit_hash="1234",
-            pin_rm_lab_edit_hash="1234",
-            pin_dispatch_edit_hash="1234",
-            pin_production_details_edit_hash="1234",
-            pin_production_report_access_hash="1234",
-            pin_recipe_access_hash="1234",
+            **_build_default_pin_hashes(),
             full_name=full_name,
             role=UserRole.vendor.value,
             company_name=payload.get("company_name"),
@@ -146,13 +177,7 @@ def vendor_create_customer():
         user = User(
             email=email,
             password=hash_password(password),
-            settings_pin_hash="1234",
-            pin_rm_entry_edit_hash="1234",
-            pin_rm_lab_edit_hash="1234",
-            pin_dispatch_edit_hash="1234",
-            pin_production_details_edit_hash="1234",
-            pin_production_report_access_hash="1234",
-            pin_recipe_access_hash="1234",
+            **_build_default_pin_hashes(),
             full_name=full_name,
             role=UserRole.customer.value,
             company_name=payload.get("company_name"),
@@ -207,8 +232,11 @@ def verify_settings_pin():
 
         pin_field = PIN_TYPE_FIELD_MAP[pin_type]
         stored_pin_value = str(getattr(user, pin_field, "") or "").strip()
-        if not stored_pin_value or pin != stored_pin_value:
+        if not stored_pin_value or not verify_password(pin, stored_pin_value):
             return error("Invalid PIN", 401)
+        if not is_password_hashed(stored_pin_value):
+            setattr(user, pin_field, hash_password(pin))
+            db.flush()
         return jsonify({"ok": True, "pin_type": pin_type})
 
 
@@ -236,9 +264,10 @@ def change_settings_pin():
 
         pin_field = PIN_TYPE_FIELD_MAP[pin_type]
         stored_pin_value = str(getattr(user, pin_field, "") or "").strip()
-        if not stored_pin_value or current_pin != stored_pin_value:
+        if not stored_pin_value or not verify_password(current_pin, stored_pin_value):
             return error("Current PIN is incorrect", 401)
 
-        setattr(user, pin_field, new_pin)
+        setattr(user, pin_field, hash_password(new_pin))
         db.flush()
         return jsonify({"ok": True, "detail": "PIN updated successfully", "pin_type": pin_type})
+

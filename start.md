@@ -4,6 +4,9 @@
 
 >>>>> cd frontend && npm run dev                                             >>>> for poultry dashboard
 
+>cd backend && cd database && venv\Scripts\activate
+
+>python schema.py
 
 >cd backend && cd app && venv\Scripts\activate
 

@@ -14,6 +14,25 @@ from starlette.responses import Response as StarletteResponse
 
 _current_request: ContextVar["_CompatRequest"] = ContextVar("current_request")
 
+PUBLIC_PATHS = {
+    "/api/health",
+    "/api/auth/login",
+    "/api/auth/vendor-signup",
+}
+
+PROTECTED_PREFIXES = (
+    "/api/auth",
+    "/api/config",
+    "/api/raw-material",
+    "/api/dispatch",
+    "/api/stock",
+    "/api/production",
+)
+
+HMI_EXEMPT_PREFIXES = (
+    "/api/production/hmi",
+)
+
 
 # Define RequestProxy.
 
@@ -188,6 +207,35 @@ async def _build_compat_request(raw_request: Request) -> _CompatRequest:
     return _CompatRequest(raw_request, json_payload=json_payload, json_error=json_error)
 
 
+def _normalize_path(path: str) -> str:
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        return "/"
+    if len(raw_path) > 1 and raw_path.endswith("/"):
+        return raw_path[:-1]
+    return raw_path
+
+
+def _requires_auth(path: str) -> bool:
+    normalized_path = _normalize_path(path)
+    if normalized_path in PUBLIC_PATHS:
+        return False
+    if any(normalized_path.startswith(prefix) for prefix in HMI_EXEMPT_PREFIXES):
+        return False
+    return any(normalized_path.startswith(prefix) for prefix in PROTECTED_PREFIXES)
+
+
+def _enforce_authentication() -> None:
+    from app.db import SessionLocal
+    from .common import current_user
+
+    db = SessionLocal()
+    try:
+        current_user(db)
+    finally:
+        db.close()
+
+
 # Handle wrap endpoint.
 
 def _wrap_endpoint(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -197,6 +245,11 @@ def _wrap_endpoint(func: Callable[..., Any]) -> Callable[..., Any]:
         compat_request = await _build_compat_request(request)
         token = _current_request.set(compat_request)
         try:
+            if _requires_auth(request.url.path):
+                try:
+                    _enforce_authentication()
+                except PermissionError as exc:
+                    return JSONResponse(content={"detail": str(exc)}, status_code=401)
             path_params = dict(request.path_params)
             if inspect.iscoroutinefunction(func):
                 result = await func(**path_params)

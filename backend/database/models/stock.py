@@ -2,7 +2,7 @@ from sqlalchemy import String, Float, DateTime, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime
 
-from ..db import Base
+from ..connection import Base
 
 
 # Define RMStockLedger.

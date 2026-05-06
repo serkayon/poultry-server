@@ -17,9 +17,9 @@ from ..common import (
     serialize_batch,
     serialize_batch_material,
     serialize_report)
-from ...models.config import ProductType, Recipe
-from ...models.plc import PLCDataSnapshot
-from ...models.production import ProductionBatch, ProductionBatchMaterial, ProductionReport
+from app.models.config import ProductType, Recipe
+from app.models.plc import PLCDataSnapshot
+from app.models.production import ProductionBatch, ProductionBatchMaterial, ProductionReport
 from ...services.plc_simulator import ensure_plc_live_data, get_or_create_machine_state
 from ...services.production_runtime import (
     evaluate_mark_complete_eligibility,
@@ -544,6 +544,7 @@ def create_batch():
                 hmi_started_at=now,
                 hmi_completed_at=now,
                 stock_posted=False,
+                rm_reduced=True,
                 rm_shortage_flag=False,
                 rm_shortage_detail=None,
                 last_modified_at=now)
@@ -569,6 +570,9 @@ def create_batch():
             db.flush()
 
             batch.stock_posted = True
+            # Session is configured with autoflush=False; flush batch flags
+            # so rebuild queries include this completed batch immediately.
+            db.flush()
             rebuild_rm_stock_ledger(db=db)
             rebuild_feed_stock_ledger(db=db)
 
@@ -633,6 +637,7 @@ def create_hmi_batch():
                 hmi_started_at=None,
                 hmi_completed_at=None,
                 stock_posted=False,
+                rm_reduced=False,
                 rm_shortage_flag=False,
                 rm_shortage_detail=None,
                 last_modified_at=datetime.utcnow())
@@ -728,6 +733,7 @@ def start_hmi_batch():
                 hmi_started_at=now,
                 hmi_completed_at=None,
                 stock_posted=False,
+                rm_reduced=False,
                 rm_shortage_flag=bool(projected_shortage_detail),
                 rm_shortage_detail=projected_shortage_detail,
                 last_modified_at=now)
@@ -864,6 +870,7 @@ def mark_batch_complete(batch_id: int):
                 f"{warning_detail}"
             )
         return jsonify(response_payload)
+
 
 # Returns whether a batch can be marked complete and why.
 
@@ -1153,6 +1160,9 @@ def update_batch_details(batch_id: int):
                 batch_updated = True
 
             if rm_stock_rebuild_required:
+                # Session is configured with autoflush=False; flush model edits
+                # before rebuilding ledger queries from batch/material tables.
+                db.flush()
                 rebuild_rm_stock_ledger(db=db)
 
             if batch_updated:
@@ -1162,6 +1172,9 @@ def update_batch_details(batch_id: int):
             if posted_now:
                 feed_stock_rebuild_required = True
             if feed_stock_rebuild_required:
+                # Ensure modified batch fields (date/product/output/stock_posted)
+                # are visible to rebuild queries in this same transaction.
+                db.flush()
                 rebuild_feed_stock_ledger(db=db)
             _refresh_material_total_quantity(db, batch=batch)
             machine_state = get_or_create_machine_state(db)
@@ -1189,6 +1202,7 @@ def update_batch_details(batch_id: int):
                         .all()
                     ],
                     "stock_posted": bool(batch.stock_posted),
+                    "rm_reduced": bool(batch.rm_reduced),
                 }
             )
     except ValueError as exc:
@@ -1242,7 +1256,14 @@ def submit_production_report():
                     setattr(report, field, parse_float(payload, field))
 
             db.flush()
-            return jsonify({"id": report.id, "batch_id": batch_id, "stock_posted": bool(batch.stock_posted)})
+            return jsonify(
+                {
+                    "id": report.id,
+                    "batch_id": batch_id,
+                    "stock_posted": bool(batch.stock_posted),
+                    "rm_reduced": bool(batch.rm_reduced),
+                }
+            )
     except ValueError as exc:
         return error(str(exc))
 
@@ -1633,4 +1654,5 @@ def download_batch_consumption_report(batch_id: int):
         export_batch_consumption_report_pdf(sections),
         mimetype="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}.pdf"})
+
 

@@ -6,8 +6,8 @@ from ..fastapi_compat import Blueprint, jsonify, request
 from sqlalchemy import case, func, select
 
 from ..common import db_session, dt, error, serialize_batch
-from ...models.plc import PLCDataSnapshot
-from ...models.production import ProductionBatch, ProductionBatchMaterial, ProductionReport
+from app.models.plc import PLCDataSnapshot
+from app.models.production import ProductionBatch, ProductionBatchMaterial, ProductionReport
 from ...services.plc_simulator import (
     ensure_plc_live_data,
     get_or_create_machine_state,
@@ -357,3 +357,4 @@ def machine_stop():
             select(PLCDataSnapshot).order_by(PLCDataSnapshot.recorded_at.desc()).limit(1)
         ).scalars().one_or_none()
         return jsonify(_machine_status_payload(machine_state, latest_row, None))
+

@@ -11,8 +11,8 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..database import SessionLocal
-from ..models.plc import MachineState, PLCDataSnapshot
+from app.db import SessionLocal
+from app.models.plc import MachineState, PLCDataSnapshot
 from .production_runtime import sync_active_batch_progress
 
 MACHINE_STATE_ID = 1
@@ -238,3 +238,4 @@ def start_plc_background_writer(interval_seconds: int = 5, lookback_minutes: int
             daemon=True,
             name="plc-background-writer")
         _writer_thread.start()
+

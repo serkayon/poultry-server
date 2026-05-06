@@ -1,27 +1,67 @@
-import React, { createContext, useContext, useMemo, useState } from 'react'
-import { clearAuthSession, getAuthUser, setAuthSession } from '../api/client'
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import {
+  clearAuthSession,
+  getAuthToken,
+  getAuthTokenExpiryMs,
+  getAuthUser,
+  setAuthSession,
+} from '../api/client'
 
 const AuthContext = createContext(null)
 
-const DEFAULT_USER = { full_name: 'User', company_name: 'Poultry Farm' }
+const readAuthState = () => {
+  const token = getAuthToken()
+  const user = getAuthUser()
+  return {
+    user: token && user ? user : null,
+    isAuthenticated: Boolean(token && user),
+  }
+}
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => getAuthUser() || DEFAULT_USER)
+  const [authState, setAuthState] = useState(readAuthState)
 
   const login = (token, nextUser) => {
-    const resolvedUser = nextUser && typeof nextUser === 'object' ? nextUser : DEFAULT_USER
+    const resolvedUser = nextUser && typeof nextUser === 'object' ? nextUser : null
     setAuthSession(token, resolvedUser)
-    setUser(resolvedUser)
+    setAuthState(readAuthState())
   }
 
   const logout = () => {
     clearAuthSession()
-    setUser(DEFAULT_USER)
+    setAuthState({ user: null, isAuthenticated: false })
   }
 
+  useEffect(() => {
+    if (!authState.isAuthenticated) return undefined
+    const expiryMs = getAuthTokenExpiryMs()
+    if (!expiryMs || Date.now() >= expiryMs) {
+      clearAuthSession()
+      setAuthState({ user: null, isAuthenticated: false })
+      return undefined
+    }
+
+    const timeoutMs = Math.max(expiryMs - Date.now(), 0)
+    const timer = window.setTimeout(() => {
+      clearAuthSession()
+      setAuthState({ user: null, isAuthenticated: false })
+    }, timeoutMs)
+
+    return () => window.clearTimeout(timer)
+  }, [authState.isAuthenticated])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const syncFromStorage = () => {
+      setAuthState(readAuthState())
+    }
+    window.addEventListener('storage', syncFromStorage)
+    return () => window.removeEventListener('storage', syncFromStorage)
+  }, [])
+
   const value = useMemo(
-    () => ({ user, loading: false, login, logout }),
-    [user]
+    () => ({ user: authState.user, isAuthenticated: authState.isAuthenticated, loading: false, login, logout }),
+    [authState]
   )
 
   return (

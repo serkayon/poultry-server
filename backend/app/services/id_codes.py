@@ -94,7 +94,7 @@ def _generate_unique_code(
 # Assign a unique dispatch code to a dispatch entry.
 
 def assign_dispatch_code(db, entry) -> str:
-    from ..models.dispatch import DispatchEntry
+    from app.models.dispatch import DispatchEntry
 
     code = _generate_unique_code(
         db,
@@ -112,7 +112,7 @@ def assign_dispatch_code(db, entry) -> str:
 # Assign a unique code to a raw material entry.
 
 def assign_raw_material_entry_code(db, entry) -> str:
-    from ..models.raw_material import RawMaterialEntry
+    from app.models.raw_material import RawMaterialEntry
 
     code = _generate_unique_code(
         db,
@@ -130,7 +130,7 @@ def assign_raw_material_entry_code(db, entry) -> str:
 # Backfill or normalize all dispatch codes.
 
 def ensure_dispatch_codes(db) -> int:
-    from ..models.dispatch import DispatchEntry
+    from app.models.dispatch import DispatchEntry
 
     rows = (
         db.execute(select(DispatchEntry).order_by(DispatchEntry.id.asc()))
@@ -165,7 +165,7 @@ def ensure_dispatch_codes(db) -> int:
 # Backfill or normalize all raw material entry codes.
 
 def ensure_raw_material_entry_codes(db) -> int:
-    from ..models.raw_material import RawMaterialEntry
+    from app.models.raw_material import RawMaterialEntry
 
     rows = (
         db.execute(select(RawMaterialEntry).order_by(RawMaterialEntry.id.asc()))
@@ -195,3 +195,4 @@ def ensure_raw_material_entry_codes(db) -> int:
         changed += 1
 
     return changed
+

@@ -27,8 +27,61 @@ const getStoredValue = (key) => {
   return String(window.localStorage.getItem(key) || '')
 }
 
-export const getAuthToken = () => getStoredValue(AUTH_TOKEN_STORAGE_KEY)
+const decodeJwtPayload = (token) => {
+  const rawToken = String(token || '').trim()
+  if (!rawToken) return null
+  const parts = rawToken.split('.')
+  if (parts.length < 2) return null
+  const payloadPart = String(parts[1] || '').replace(/-/g, '+').replace(/_/g, '/')
+  const padded = payloadPart.padEnd(payloadPart.length + ((4 - (payloadPart.length % 4)) % 4), '=')
+  try {
+    if (typeof window !== 'undefined' && typeof window.atob === 'function') {
+      return JSON.parse(window.atob(padded))
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+const getTokenExpiryMs = (token) => {
+  const payload = decodeJwtPayload(token)
+  const exp = Number(payload?.exp || 0)
+  if (!Number.isFinite(exp) || exp <= 0) return 0
+  return exp * 1000
+}
+
+export const isAuthTokenValid = (token) => {
+  const rawToken = String(token || '').trim()
+  if (!rawToken) return false
+  const expiryMs = getTokenExpiryMs(rawToken)
+  if (!expiryMs) return false
+  return Date.now() < expiryMs
+}
+
+const purgeInvalidAuthSession = () => {
+  if (typeof window === 'undefined') return
+  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY)
+  window.localStorage.removeItem(AUTH_USER_STORAGE_KEY)
+}
+
+export const getAuthToken = () => {
+  const token = getStoredValue(AUTH_TOKEN_STORAGE_KEY)
+  if (!isAuthTokenValid(token)) {
+    purgeInvalidAuthSession()
+    return ''
+  }
+  return token
+}
+
+export const getAuthTokenExpiryMs = () => {
+  const token = getAuthToken()
+  if (!token) return 0
+  return getTokenExpiryMs(token)
+}
+
 export const getAuthUser = () => {
+  if (!getAuthToken()) return null
   const raw = getStoredValue(AUTH_USER_STORAGE_KEY)
   if (!raw) return null
   try {
@@ -55,9 +108,7 @@ export const setAuthSession = (token, user = null) => {
 }
 
 export const clearAuthSession = () => {
-  if (typeof window === 'undefined') return
-  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY)
-  window.localStorage.removeItem(AUTH_USER_STORAGE_KEY)
+  purgeInvalidAuthSession()
 }
 
 let backendReachable = true
@@ -124,6 +175,12 @@ const isBackendOfflineError = (error) => {
   return false
 }
 
+// True when a 401 comes from PIN verification/change endpoints.
+const isPinAuthRequest = (error) => {
+  const requestUrl = String(error?.config?.url || '').toLowerCase()
+  return requestUrl.includes('/auth/pin/verify') || requestUrl.includes('/auth/pin/change')
+}
+
 client.interceptors.response.use(
   (response) => {
     setBackendReachable(true)
@@ -131,6 +188,12 @@ client.interceptors.response.use(
   },
   (error) => {
     setBackendReachable(!isBackendOfflineError(error))
+    if (Number(error?.response?.status || 0) === 401 && !isPinAuthRequest(error)) {
+      clearAuthSession()
+      if (typeof window !== 'undefined' && window.location.pathname.startsWith('/layout')) {
+        window.location.replace('/')
+      }
+    }
     return Promise.reject(error)
   }
 )// it is the response interceptor, it will return the response as is, and in case of error it will reject the promise with the error
