@@ -3,10 +3,11 @@ import client from "./assets/login.png";
 import { useNavigate } from "react-router-dom";
 import { auth } from "../api/client";
 import { useAuth } from "../context/AuthContext";
-
+import { Eye, EyeOff } from "lucide-react";
 export default function ClientLogin() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 900);
@@ -140,14 +141,40 @@ export default function ClientLogin() {
               required
             />
 
-            <input
-              style={inputStyle}
-              type="password"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
+         <div style={{ position: "relative", marginBottom: 16 }}>
+  <input
+    style={{
+      ...inputStyle,
+      marginBottom: 0,
+      paddingRight: 45,
+    }}
+    type={showPassword ? "text" : "password"}
+    placeholder="Password"
+    value={password}
+    onChange={(e) => setPassword(e.target.value)}
+    required
+  />
+
+  <button
+    type="button"
+    onClick={() => setShowPassword(!showPassword)}
+    style={{
+      position: "absolute",
+      right: 12,
+      top: "50%",
+      transform: "translateY(-50%)",
+      background: "transparent",
+      border: "none",
+      cursor: "pointer",
+      color: "#cdd6df",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+    }}
+  >
+    {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+  </button>
+</div>
 
             <div
               style={{
