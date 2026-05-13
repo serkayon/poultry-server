@@ -13,6 +13,7 @@ import matplotlib.ticker as mticker
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from reportlab.lib import colors
 from reportlab.lib.colors import HexColor
@@ -59,13 +60,14 @@ def _excel_fill(hex_color: str) -> PatternFill:
 # Handle excel autofit columns.
 
 def _excel_autofit_columns(ws, min_width: int = 10, max_width: int = 48) -> None:
-    for column_cells in ws.columns:
+    for col_idx, column_cells in enumerate(ws.columns, start=1):
         lengths = []
         for cell in column_cells:
             value = "" if cell.value is None else str(cell.value)
             lengths.append(len(value))
         width = max(lengths) + 2 if lengths else min_width
-        ws.column_dimensions[column_cells[0].column_letter].width = max(min_width, min(width, max_width))
+        column_letter = get_column_letter(col_idx)
+        ws.column_dimensions[column_letter].width = max(min_width, min(width, max_width))
 
 # Handle excel apply table style.
 

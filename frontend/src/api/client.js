@@ -248,6 +248,8 @@ export const auth = {
   login: (email, password) => client.post('/auth/login', { email, password }),
   vendorSignup: (data) => client.post('/auth/vendor-signup', data),
   vendorCreateCustomer: (data) => client.post('/auth/vendor/customer-signup', data),
+  profile: () => client.get('/auth/profile'),
+  updateProfile: (data) => client.put('/auth/profile', data),
   demoVendor: () => client.post('/auth/demo/vendor'),
   demoCustomer: () => client.post('/auth/demo/customer'),
   verifyPin: (pin, pinType = 'settings') => client.post('/auth/pin/verify', { pin, pin_type: pinType }),

@@ -143,6 +143,7 @@ def vendor_signup():
             full_name=full_name,
             role=UserRole.vendor.value,
             company_name=payload.get("company_name"),
+            phone=payload.get("phone"),
             address=payload.get("address"))
         db.add(user)
         db.flush()
@@ -181,9 +182,62 @@ def vendor_create_customer():
             full_name=full_name,
             role=UserRole.customer.value,
             company_name=payload.get("company_name"),
+            phone=payload.get("phone"),
             address=payload.get("address"),
             created_by_id=vendor.id)
         db.add(user)
+        db.flush()
+        db.refresh(user)
+        return jsonify(serialize_user(user))
+
+
+@auth_bp.get("/profile")
+def get_profile():
+    with db_session() as db:
+        try:
+            user = current_user(db)
+        except PermissionError as exc:
+            return error(str(exc), 401)
+        return jsonify(serialize_user(user))
+
+
+@auth_bp.put("/profile")
+def update_profile():
+    try:
+        payload = json_body()
+    except ValueError as exc:
+        return error(str(exc))
+
+    with db_session() as db:
+        try:
+            user = current_user(db)
+        except PermissionError as exc:
+            return error(str(exc), 401)
+
+        next_full_name = str(payload.get("full_name", user.full_name) or "").strip()
+        next_company_name = payload.get("company_name")
+        next_phone = payload.get("phone")
+        next_address = payload.get("address")
+
+        if not next_full_name:
+            return error("full_name is required")
+
+        if "email" in payload:
+            next_email = str(payload.get("email") or "").strip().lower()
+            if not next_email:
+                return error("email is required")
+            existing = db.execute(
+                select(User).where(User.email == next_email, User.id != user.id)
+            ).scalars().one_or_none()
+            if existing:
+                return error("Email already registered")
+            user.email = next_email
+
+        user.full_name = next_full_name
+        user.company_name = str(next_company_name).strip() if next_company_name is not None else None
+        user.phone = str(next_phone).strip() if next_phone is not None else None
+        user.address = str(next_address).strip() if next_address is not None else None
+
         db.flush()
         db.refresh(user)
         return jsonify(serialize_user(user))

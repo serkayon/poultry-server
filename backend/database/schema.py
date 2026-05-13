@@ -74,6 +74,7 @@ def _seed_defaults() -> None:
                     full_name="Client User",
                     role=UserRole.customer.value,
                     company_name="Feed Mill Intelligence",
+                    phone=None,
                     address=None,
                     logo_url=None,
                     is_active=True,

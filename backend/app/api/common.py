@@ -163,6 +163,7 @@ def serialize_user(user: User) -> dict:
         "full_name": user.full_name,
         "role": user.role,
         "company_name": user.company_name,
+        "phone": user.phone,
         "address": user.address,
         "logo_url": user.logo_url,
         "is_active": user.is_active,

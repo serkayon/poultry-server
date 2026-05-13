@@ -14,7 +14,7 @@ import {
   AlertTriangle,
   LogOut,
 } from "lucide-react";
-import { productionApi } from "../api/client";
+import { auth, getAuthToken, getAuthUser, productionApi, setAuthSession } from "../api/client";
 
 // Primary application shell with navigation and batch notifications.
 const nav = [
@@ -36,10 +36,13 @@ export default function Layout() {
   const [isScrolled, setIsScrolled] = useState(false);
   const [showCompanyPopup, setShowCompanyPopup] = useState(false);
   const [showLogoutPopup, setShowLogoutPopup] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [companyInfo, setCompanyInfo] = useState({
-    companyName: "POULTRY NET INTELLIGENCE",
-    phone: "+91 98765 43210",
-    email: "poultrynet@hotmail.com",
+    fullName: "",
+    companyName: "",
+    phone: "",
+    email: "",
+    address: "",
   });
   const mainRef = useRef(null);
   const navigate = useNavigate();
@@ -54,6 +57,77 @@ export default function Layout() {
     setTimeout(() => {
       navigate("/", { replace: true });
     }, 10);
+  };
+
+  useEffect(() => {
+    const cachedUser = getAuthUser();
+    if (cachedUser) {
+      setCompanyInfo({
+        fullName: cachedUser.full_name || "",
+        companyName: cachedUser.company_name || "",
+        phone: cachedUser.phone || "",
+        email: cachedUser.email || "",
+        address: cachedUser.address || "",
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadProfile = async () => {
+      try {
+        const { data } = await auth.profile();
+        if (!active || !data) return;
+        setCompanyInfo({
+          fullName: data.full_name || "",
+          companyName: data.company_name || "",
+          phone: data.phone || "",
+          email: data.email || "",
+          address: data.address || "",
+        });
+        const token = getAuthToken();
+        if (token) {
+          setAuthSession(token, data);
+        }
+      } catch {
+        // Ignore profile fetch failures and keep cached auth user values.
+      }
+    };
+    loadProfile();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleProfileSave = async () => {
+    if (isSavingProfile) return;
+    setIsSavingProfile(true);
+    try {
+      const payload = {
+        full_name: companyInfo.fullName.trim(),
+        company_name: companyInfo.companyName.trim(),
+        phone: companyInfo.phone.trim(),
+        email: companyInfo.email.trim().toLowerCase(),
+        address: companyInfo.address.trim(),
+      };
+      const { data } = await auth.updateProfile(payload);
+      setCompanyInfo({
+        fullName: data.full_name || "",
+        companyName: data.company_name || "",
+        phone: data.phone || "",
+        email: data.email || "",
+        address: data.address || "",
+      });
+      const token = getAuthToken();
+      if (token) {
+        setAuthSession(token, data);
+      }
+      setShowCompanyPopup(false);
+    } catch {
+      // Keep popup open so user can retry if update fails.
+    } finally {
+      setIsSavingProfile(false);
+    }
   };
 
   useEffect(() => {
@@ -273,11 +347,11 @@ export default function Layout() {
               className={`text-sm md:text-md font-medium transition-colors duration-500
       ${isScrolled ? "text-gray-100" : "text-gray-800"}`}
             >
-              POULTRY NET INTELLIGENCE
+              {companyInfo.companyName || companyInfo.fullName || "Company"}
             </p>
 
             {!isScrolled && (
-              <p className="text-xs text-gray-500">+91 98765 43210</p>
+              <p className="text-xs text-gray-500">{companyInfo.phone || "-"}</p>
             )}
           </div>
 
@@ -632,6 +706,24 @@ export default function Layout() {
 
             {/* FORM */}
             <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1">
+                  Name
+                </label>
+
+                <input
+                  type="text"
+                  value={companyInfo.fullName}
+                  onChange={(e) =>
+                    setCompanyInfo({
+                      ...companyInfo,
+                      fullName: e.target.value,
+                    })
+                  }
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-[#245658]"
+                />
+              </div>
+
               {/* COMPANY NAME */}
               <div>
                 <label className="block text-sm font-semibold text-slate-700 mb-1">
@@ -689,9 +781,32 @@ export default function Layout() {
                 />
               </div>
 
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1">
+                  Address
+                </label>
+
+                <textarea
+                  value={companyInfo.address}
+                  onChange={(e) =>
+                    setCompanyInfo({
+                      ...companyInfo,
+                      address: e.target.value,
+                    })
+                  }
+                  rows={3}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-[#245658]"
+                />
+              </div>
+
               {/* SAVE BUTTON */}
-              <button className="w-full bg-[#245658] hover:bg-[#1c4547] text-white font-semibold py-2.5 rounded-lg transition-all duration-300">
-                Save
+              <button
+                type="button"
+                onClick={handleProfileSave}
+                disabled={isSavingProfile}
+                className="w-full bg-[#245658] hover:bg-[#1c4547] text-white font-semibold py-2.5 rounded-lg transition-all duration-300 disabled:opacity-70 disabled:cursor-not-allowed"
+              >
+                {isSavingProfile ? "Saving..." : "Save"}
               </button>
             </div>
           </div>
